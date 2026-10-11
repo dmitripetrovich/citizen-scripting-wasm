@@ -3,6 +3,9 @@
 use std::cell::UnsafeCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Poll, Waker, RawWaker, RawWakerVTable};
 struct GlobalCell<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for GlobalCell<T> {}
 impl<T> GlobalCell<T> {
@@ -12,6 +15,7 @@ impl<T> GlobalCell<T> {
 }
 
 static CTX: GlobalCell<Option<Context>> = GlobalCell::new(None);
+static CORO_WAIT_MS: GlobalCell<i64> = GlobalCell::new(0);
 
 #[inline]
 fn ctx() -> &'static mut Context {
@@ -450,6 +454,11 @@ struct TimerEntry {
         callback: Box<dyn Fn()>,
 }
 
+struct CoroutineEntry {
+        future: Pin<Box<dyn Future<Output = ()>>>,
+        resume_at: u64,
+}
+
 struct Context {
         resource_name: String,
         events: HashMap<String, Vec<EventHandlerEntry>>,
@@ -462,6 +471,8 @@ struct Context {
         net_safe_events: HashSet<String>,
         timers: HashMap<i32, TimerEntry>,
         next_timer_id: i32,
+        coroutines: HashMap<i32, CoroutineEntry>,
+        next_coroutine_id: i32,
         commands: HashMap<String, Vec<Box<dyn Fn(&str, &[String])>>>,
         ref_callbacks: HashMap<i32, RefCallbackFn>,
         ref_counts: HashMap<i32, i32>,
@@ -487,6 +498,8 @@ impl Context {
                         net_safe_events: HashSet::new(),
                         timers: HashMap::new(),
                         next_timer_id: 1,
+                        coroutines: HashMap::new(),
+                        next_coroutine_id: 1,
                         commands: HashMap::new(),
                         ref_callbacks: HashMap::new(),
                         ref_counts: HashMap::new(),
@@ -513,6 +526,36 @@ impl Context {
                 id
         }
 }
+
+fn noop_waker() -> Waker {
+        fn noop(_: *const ()) {}
+        fn clone(p: *const ()) -> RawWaker { RawWaker::new(p, &VTABLE) }
+        const VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+        unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
+}
+
+fn resume_coroutine_by_id(id: i32) {
+        unsafe { *CORO_WAIT_MS.get() = 0; }
+        let c = ctx();
+        let mut entry = match c.coroutines.remove(&id) {
+                Some(e) => e,
+                None => return,
+        };
+        let waker = noop_waker();
+        let mut cx = core::task::Context::from_waker(&waker);
+        match entry.future.as_mut().poll(&mut cx) {
+                Poll::Ready(()) => {}
+                Poll::Pending => {
+                        let wait_ms = unsafe { *CORO_WAIT_MS.get() };
+                        let now = ctx().now_ms();
+                        entry.resume_at = if wait_ms > 0 { now + wait_ms as u64 } else { now };
+                        let deadline = if wait_ms <= 0 { 0 } else if wait_ms > i32::MAX as i64 { i32::MAX } else { wait_ms as i32 };
+                        unsafe { __cfx_schedule_bookmark(id, deadline); }
+                        ctx().coroutines.insert(id, entry);
+                }
+        }
+}
+
 fn create_ref(cb: RefCallbackFn) -> i32 {
         let c = ctx();
         let id = allocate_id(&mut c.next_callback_id, &c.ref_callbacks);
@@ -1052,6 +1095,55 @@ pub fn poll_worker(worker_id: i32, max_output: usize) -> WorkerResult {
         WorkerResult { status: raw, output: buf }
 }
 
+pub fn wait(ms: u64) -> impl Future<Output = ()> {
+        struct WaitFuture(bool, u64);
+        impl Future for WaitFuture {
+                type Output = ();
+                fn poll(mut self: Pin<&mut Self>, _cx: &mut core::task::Context<'_>) -> Poll<()> {
+                        if self.0 {
+                                Poll::Ready(())
+                        } else {
+                                self.0 = true;
+                                unsafe { *CORO_WAIT_MS.get() = self.1 as i64; }
+                                Poll::Pending
+                        }
+                }
+        }
+        WaitFuture(false, ms)
+}
+
+pub fn create_coroutine(f: impl Future<Output = ()> + 'static) {
+        create_coroutine_impl(f, false);
+}
+
+pub fn create_coroutine_now(f: impl Future<Output = ()> + 'static) {
+        create_coroutine_impl(f, true);
+}
+
+pub fn create_thread(f: impl Future<Output = ()> + 'static) {
+        create_coroutine(f);
+}
+
+fn create_coroutine_impl(f: impl Future<Output = ()> + 'static, resume_now: bool) {
+        let c = ctx();
+        if c.coroutines.len() >= 4096 {
+                trace_str(&format!("[script:{}] coroutine limit (4096) reached\n", c.resource_name));
+                return;
+        }
+        let id = allocate_id(&mut c.next_coroutine_id, &c.coroutines);
+        if id < 0 {
+                trace_str(&format!("[script:{}] no free coroutine id\n", c.resource_name));
+                return;
+        }
+        let now = c.now_ms();
+        c.coroutines.insert(id, CoroutineEntry { future: Box::pin(f), resume_at: now });
+        if resume_now {
+                resume_coroutine_by_id(id);
+        } else {
+                unsafe { __cfx_schedule_bookmark(id, 0); }
+        }
+}
+
 pub fn perform_http_request(url: &str, method: &str, data: &str, headers: &[(&str, &str)], callback: impl FnOnce(i32, String, String) + 'static) {
         let mut headers_json = "{}".to_string();
         if !headers.is_empty() {
@@ -1148,6 +1240,19 @@ pub mod runtime {
         }
 
         pub fn on_tick() {
+                {
+                        let c = ctx();
+                        if !c.coroutines.is_empty() {
+                                let now = c.now_ms();
+                                let ready: Vec<i32> = c.coroutines.iter()
+                                        .filter(|(_, e)| now >= e.resume_at)
+                                        .map(|(id, _)| *id)
+                                        .collect();
+                                for id in ready {
+                                        resume_coroutine_by_id(id);
+                                }
+                        }
+                }
                 let c = ctx();
                 let now = c.now_ms();
                 let expired: Vec<i32> = c.timers.iter()
@@ -1200,6 +1305,7 @@ pub mod runtime {
 
         pub fn on_stop() {
                 let c = ctx();
+                c.coroutines.clear();
                 c.export_ref_cache.clear();
                 let refs: Vec<(i32, i32)> = c.state_bag_handler_refs.drain().collect();
                 for (cookie, host_ref) in refs {
@@ -1228,7 +1334,7 @@ pub mod runtime {
 
         pub fn has_pending_work() -> i32 {
                 let c = ctx();
-                if !c.ticks.is_empty() || !c.timers.is_empty() { 1 } else { 0 }
+                if !c.ticks.is_empty() || !c.timers.is_empty() || !c.coroutines.is_empty() { 1 } else { 0 }
         }
 
         pub fn invoke_ref(callback_id: i32, args_ptr: *const u8, args_len: u32, result_ptr: *mut u8, result_max: u32) -> i32 {
@@ -1263,7 +1369,12 @@ pub mod runtime {
                 }
         }
 
-        pub fn tick_bookmarks(_bookmarks: *const i32, _count: i32) {
+        pub fn tick_bookmarks(bookmarks: *const i32, count: i32) {
+                if count <= 0 { return; }
+                let ids = unsafe { std::slice::from_raw_parts(bookmarks, count as usize) };
+                for &id in ids {
+                        resume_coroutine_by_id(id);
+                }
         }
 }
 pub mod natives {
