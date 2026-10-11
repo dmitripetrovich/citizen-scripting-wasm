@@ -1153,8 +1153,9 @@ pub struct ProcessResult {
 }
 
 pub fn spawn_process(command: &str, max_output: i32) -> ProcessResult {
-        let mut buf = vec![0u8; max_output as usize];
-        let status = unsafe { __cfx_spawn_process(command.as_ptr(), command.len() as u32, buf.as_mut_ptr(), max_output) };
+        let capped = if max_output <= 0 { 0 } else { max_output.min(1 << 20) as usize };
+        let mut buf = vec![0u8; capped];
+        let status = unsafe { __cfx_spawn_process(command.as_ptr(), command.len() as u32, buf.as_mut_ptr(), capped as i32) };
         let output = if status > 0 {
                 buf.truncate(status as usize);
                 String::from_utf8(buf).unwrap_or_default()
@@ -1171,8 +1172,8 @@ pub struct WorkerResult {
 }
 
 impl WorkerResult {
-        pub fn is_running(&self) -> bool { self.status == -1 }
-        pub fn is_error(&self) -> bool { self.status == -2 }
+        pub fn is_running(&self) -> bool { self.status == -3 }
+        pub fn is_error(&self) -> bool { self.status == -1 }
         pub fn is_done(&self) -> bool { self.status >= 0 }
         pub fn output_str(&self) -> &str {
                 core::str::from_utf8(&self.output).unwrap_or("")
@@ -1184,8 +1185,9 @@ pub fn create_worker(fn_name: &str, input: &[u8]) -> i32 {
 }
 
 pub fn poll_worker(worker_id: i32, max_output: usize) -> WorkerResult {
-        let mut buf = vec![0u8; max_output];
-        let raw = unsafe { __cfx_poll_worker(worker_id, buf.as_mut_ptr(), max_output as i32) };
+        let capped = max_output.min(1 << 20);
+        let mut buf = vec![0u8; capped];
+        let raw = unsafe { __cfx_poll_worker(worker_id, buf.as_mut_ptr(), capped as i32) };
         if raw >= 0 {
                 buf.truncate(raw as usize);
         } else {
