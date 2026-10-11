@@ -162,7 +162,7 @@ def to_safe_param(name: str) -> str:
 
 def generate_wrapper(native: dict) -> str | None:
         name = native.get("name")
-        if not name:
+        if not name or name.startswith("0x") or name.startswith("_0x"):
                 return None
         hash_str = native.get("hash", "0x0")
         params = native.get("params", [])
@@ -199,8 +199,17 @@ def generate_wrapper(native: dict) -> str | None:
 
 
 def generate_namespace_block(namespace: str, natives: list[dict]) -> tuple[str, str, int] | None:
+        seen: dict[tuple, dict] = {}
+        for n in natives:
+                name = n.get("name")
+                if not name:
+                        continue
+                cpp_types = tuple(PARAM_TYPE_MAP.get(p.get("type", "int"), p.get("type", "")) for p in n.get("params", []))
+                key = (screaming_to_pascal(name), cpp_types)
+                if key not in seen:
+                        seen[key] = n
         wrappers = []
-        for n in sorted(natives, key=lambda x: x.get("name", "")):
+        for n in sorted(seen.values(), key=lambda x: x.get("name", "")):
                 w = generate_wrapper(n)
                 if w:
                         wrappers.append(w)
@@ -278,7 +287,7 @@ def to_safe_rust_param(name: str) -> str:
 
 def generate_rust_wrapper(native: dict) -> str | None:
         name = native.get("name")
-        if not name:
+        if not name or name.startswith("0x") or name.startswith("_0x"):
                 return None
         hash_str = native.get("hash", "0x0")
         params = native.get("params", [])
@@ -335,8 +344,16 @@ def generate_rust_wrapper(native: dict) -> str | None:
 
 
 def generate_rust_namespace_block(namespace: str, natives: list[dict]) -> tuple[str, str, int] | None:
+        by_name: dict[str, dict] = {}
+        for n in natives:
+                name = n.get("name")
+                if not name:
+                        continue
+                prev = by_name.get(name)
+                if prev is None or len(n.get("params", [])) > len(prev.get("params", [])):
+                        by_name[name] = n
         wrappers = []
-        for n in sorted(natives, key=lambda x: x.get("name", "")):
+        for n in sorted(by_name.values(), key=lambda x: x.get("name", "")):
                 w = generate_rust_wrapper(n)
                 if w:
                         wrappers.append(w)
@@ -349,8 +366,8 @@ def generate_rust_namespace_block(namespace: str, natives: list[dict]) -> tuple[
 
 def embed_sdk(base_dir, output):
         files = [
-                "include/CppScriptRuntime.h",
-                "include/RustScriptRuntime.rs",
+                "include/CppSdk.h",
+                "include/RustSdk.rs",
                 "src/natives/all.h",
                 "src/natives/all.rs",
         ]
@@ -369,13 +386,13 @@ def embed_sdk(base_dir, output):
 def main():
         import argparse
         parser = argparse.ArgumentParser()
-        parser.add_argument("--game", choices=GAME_URLS.keys(), default="fivem")
+        parser.add_argument("--game", choices=list(GAME_URLS.keys()) + ["all"], nargs="*", default=["all"])
         parser.add_argument("--output", default="src/natives")
         parser.add_argument("--embed", default="src/sdk.blob")
         parser.add_argument("--no-cache", action="store_true")
         args = parser.parse_args()
         output_dir = args.output
-        game = args.game
+        games = list(GAME_URLS.keys()) if "all" in args.game else args.game
         no_cache = args.no_cache
         os.makedirs(output_dir, exist_ok=True)
         all_ns: dict[str, list[dict]] = {}
@@ -385,12 +402,13 @@ def main():
                         all_ns.setdefault(ns, []).extend(natives)
         except Exception as e:
                 print(f"Failed to fetch CFX natives: {e}")
-        try:
-                game_data = fetch_json(GAME_URLS[game], no_cache)
-                for ns, natives in parse_game_natives(game_data).items():
-                        all_ns.setdefault(ns, []).extend(natives)
-        except Exception as e:
-                print(f"Failed to fetch {game} natives: {e}")
+        for game in games:
+                try:
+                        game_data = fetch_json(GAME_URLS[game], no_cache)
+                        for ns, natives in parse_game_natives(game_data).items():
+                                all_ns.setdefault(ns, []).extend(natives)
+                except Exception as e:
+                        print(f"Failed to fetch {game} natives: {e}")
         if not all_ns:
                 print("No natives fetched")
                 sys.exit(1)

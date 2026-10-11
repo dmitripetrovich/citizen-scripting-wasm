@@ -12,8 +12,8 @@ project "citizen-scripting-wasm"
         targetname "citizen-scripting-wasm"
         targetprefix "lib"
         files {
-                "src/CppComponentHost.cpp",
-                "src/CppScriptRuntime.cpp",
+                "src/WasmComponentHost.cpp",
+                "src/WasmScriptRuntime.cpp",
                 "src/Component.cpp",
         }
         includedirs { ".", "include" }

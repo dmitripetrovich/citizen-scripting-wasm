@@ -1,4 +1,4 @@
-#include "CppScriptRuntime.h"
+#include "CppSdk.h"
 
 extern "C" intptr_t CoreFxFindFirstImpl(const guid_t& iid, guid_t* clsid);
 extern "C" int32_t CoreFxFindNextImpl(intptr_t handle, guid_t* clsid);

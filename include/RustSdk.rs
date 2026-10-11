@@ -86,6 +86,10 @@ extern "C" {
         fn __cfx_spawn_process(cmd: *const u8, cmd_len: u32, out_buf: *mut u8, out_buf_max: i32) -> i32;
         #[link_name = "get_last_spawn_exit_code"]
         fn __cfx_get_last_spawn_exit_code() -> i32;
+        #[link_name = "create_worker"]
+        fn __cfx_create_worker(fn_name: *const u8, fn_name_len: u32, input: *const u8, input_len: u32) -> i32;
+        #[link_name = "poll_worker"]
+        fn __cfx_poll_worker(worker_id: i32, out_buf: *mut u8, out_buf_max: i32) -> i32;
         #[link_name = "schedule_bookmark"]
         fn __cfx_schedule_bookmark(bookmark_id: i32, deadline_ms: i32);
         #[link_name = "is_manifest_version_v2_between"]
@@ -1019,6 +1023,35 @@ pub fn spawn_process(command: &str, max_output: i32) -> ProcessResult {
         ProcessResult { status, exit_code, output }
 }
 
+pub struct WorkerResult {
+        pub status: i32,
+        pub output: Vec<u8>,
+}
+
+impl WorkerResult {
+        pub fn is_running(&self) -> bool { self.status == -1 }
+        pub fn is_error(&self) -> bool { self.status == -2 }
+        pub fn is_done(&self) -> bool { self.status >= 0 }
+        pub fn output_str(&self) -> &str {
+                core::str::from_utf8(&self.output).unwrap_or("")
+        }
+}
+
+pub fn create_worker(fn_name: &str, input: &[u8]) -> i32 {
+        unsafe { __cfx_create_worker(fn_name.as_ptr(), fn_name.len() as u32, input.as_ptr(), input.len() as u32) }
+}
+
+pub fn poll_worker(worker_id: i32, max_output: usize) -> WorkerResult {
+        let mut buf = vec![0u8; max_output];
+        let raw = unsafe { __cfx_poll_worker(worker_id, buf.as_mut_ptr(), max_output as i32) };
+        if raw >= 0 {
+                buf.truncate(raw as usize);
+        } else {
+                buf.clear();
+        }
+        WorkerResult { status: raw, output: buf }
+}
+
 pub fn perform_http_request(url: &str, method: &str, data: &str, headers: &[(&str, &str)], callback: impl FnOnce(i32, String, String) + 'static) {
         let mut headers_json = "{}".to_string();
         if !headers.is_empty() {
@@ -1252,6 +1285,26 @@ macro_rules! Server {
                         $($body)*
                 }
                 $crate::__cfx_define_exports!(__cfx_user_main);
+        };
+}
+
+#[macro_export]
+macro_rules! cfx_worker {
+        (fn $name:ident($input:ident: &[u8], $result:ident: &mut [u8]) -> i32 $body:block) => {
+                #[no_mangle]
+                pub extern "C" fn $name(ip: i32, il: i32, rp: i32, rm: i32) -> i32 {
+                        let $input: &[u8] = if il > 0 && ip != 0 {
+                                unsafe { core::slice::from_raw_parts(ip as *const u8, il as usize) }
+                        } else {
+                                &[]
+                        };
+                        let $result: &mut [u8] = if rm > 0 && rp != 0 {
+                                unsafe { core::slice::from_raw_parts_mut(rp as *mut u8, rm as usize) }
+                        } else {
+                                &mut []
+                        };
+                        $body
+                }
         };
 }
 

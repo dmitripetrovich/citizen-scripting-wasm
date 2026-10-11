@@ -3167,7 +3167,7 @@ void __cfx_init()
 
 #else
 
-#include "CppComponentHost.h"
+#include "WasmComponentHost.h"
 
 static wasm_trap_t* CbInvokeNative(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
 static wasm_trap_t* CbCopyStringResult(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
@@ -3211,9 +3211,9 @@ class BoundaryGuard
 using WasmNativeCtx = fx::NativeCtx;
 
 // {00F3A7B9-241D-5E4C-8A93-2FA1B2C3D4E5}
-FX_DEFINE_GUID(CLSID_CppScriptRuntime, 0xF3A7B9, 0x241D, 0x5E4C, 0x8A, 0x93, 0x2F, 0xA1, 0xB2, 0xC3, 0xD4, 0xE5);
+FX_DEFINE_GUID(CLSID_WasmScriptRuntime, 0xF3A7B9, 0x241D, 0x5E4C, 0x8A, 0x93, 0x2F, 0xA1, 0xB2, 0xC3, 0xD4, 0xE5);
 
-class CppScriptRuntime final : public fx::OMClass<CppScriptRuntime, IScriptRuntime, IScriptTickRuntime, IScriptEventRuntime, IScriptRefRuntime, IScriptFileHandlingRuntime, IScriptTickRuntimeWithBookmarks, IScriptStackWalkingRuntime, IScriptMemInfoRuntime, IScriptWarningRuntime, IScriptProfiler>
+class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRuntime, IScriptTickRuntime, IScriptEventRuntime, IScriptRefRuntime, IScriptFileHandlingRuntime, IScriptTickRuntimeWithBookmarks, IScriptStackWalkingRuntime, IScriptMemInfoRuntime, IScriptWarningRuntime, IScriptProfiler>
 {
         friend wasm_trap_t* ::CbInvokeNative(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
         friend wasm_trap_t* ::CbCopyStringResult(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
@@ -3227,8 +3227,8 @@ class CppScriptRuntime final : public fx::OMClass<CppScriptRuntime, IScriptRunti
         friend wasm_trap_t* ::CbPollWorker(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
 
     public:
-        CppScriptRuntime();
-        ~CppScriptRuntime();
+        WasmScriptRuntime();
+        ~WasmScriptRuntime();
         result_t OM_DECL Create(IScriptHost* host) override;
         result_t OM_DECL Destroy() override;
 
@@ -3362,7 +3362,7 @@ class CppScriptRuntime final : public fx::OMClass<CppScriptRuntime, IScriptRunti
         {
                 std::recursive_mutex mu;
                 bool alive = true;
-                CppScriptRuntime* rt = nullptr;
+                WasmScriptRuntime* rt = nullptr;
         };
         std::shared_ptr<RefGuard> m_refGuard = std::make_shared<RefGuard>();
         bool m_eventCanceled = false;
