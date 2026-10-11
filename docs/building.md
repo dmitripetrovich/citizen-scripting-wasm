@@ -27,7 +27,7 @@ make -C build -f citizen-scripting-wasm.make config=release \
 
 ### Install runtime
 
-Copy `build/bin/Release/libcitizen-scripting-wasm.so` next to your FXServer binary.
+Copy `build/bin/Release/libcitizen-scripting-wasm.so` and `libcitizen-scripting-wasm.json` next to your FXServer binary.
 
 ### Writing a resource
 

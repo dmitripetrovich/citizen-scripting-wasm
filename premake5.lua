@@ -23,3 +23,7 @@ project "citizen-scripting-wasm"
                 optimize "Off"
         filter "configurations:Release"
                 optimize "On"
+        filter {}
+        postbuildcommands {
+                '{COPYFILE} "%{wks.location}/../component.json" "%{cfg.buildtarget.directory}/libcitizen-scripting-wasm.json"'
+        }
