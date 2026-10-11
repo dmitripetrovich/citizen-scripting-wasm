@@ -829,10 +829,35 @@ pub fn set_convar(name: &str, value: &str) {
         invoke_native_void(hash_string(b"SET_CONVAR"), &[NativeArg::ptr(n.as_ptr() as u64), NativeArg::ptr(v.as_ptr() as u64)]);
 }
 
+pub fn set_convar_replicated(name: &str, value: &str) {
+        let n = CString::new(name).unwrap_or_default();
+        let v = CString::new(value).unwrap_or_default();
+        invoke_native_void(hash_string(b"SET_CONVAR_REPLICATED"), &[NativeArg::ptr(n.as_ptr() as u64), NativeArg::ptr(v.as_ptr() as u64)]);
+}
+
 pub fn get_resource_state(resource: &str) -> String {
         let cs = CString::new(resource).unwrap_or_default();
         let ctx = invoke_native_raw(hash_string(b"GET_RESOURCE_STATE"), &[NativeArg::ptr(cs.as_ptr() as u64)], 1, 0x1);
         get_string_result(&ctx, 0)
+}
+
+pub fn get_num_resources() -> i32 {
+        invoke_native_int(hash_string(b"GET_NUM_RESOURCES"), &[])
+}
+
+pub fn get_resource_by_index(index: i32) -> String {
+        let ctx = invoke_native_raw(hash_string(b"GET_RESOURCE_BY_FIND_INDEX"), &[NativeArg::val(index as u32 as u64)], 1, 0x1);
+        get_string_result(&ctx, 0)
+}
+
+pub fn get_resources() -> Vec<String> {
+        let num = get_num_resources();
+        let mut result = Vec::new();
+        for i in 0..num {
+                let name = get_resource_by_index(i);
+                if !name.is_empty() { result.push(name); }
+        }
+        result
 }
 
 pub fn on_resource_start(handler: impl Fn(&str) + 'static) -> i32 {
@@ -899,6 +924,36 @@ pub fn call_export(resource: &str, name: &str, args: &[Value]) -> Value {
         }
         let result = decode(&ret_data);
         match result { Value::Array(ref a) if !a.is_empty() => a[0].clone(), other => other }
+}
+
+pub fn call_export_async(resource: &str, name: &str, args: &[Value], callback: impl FnOnce(Value) + 'static) {
+        let result = call_export(resource, name, args);
+        if let Value::Object(ref entries) = result {
+                if let Some(async_retval) = entries.iter().find(|(k, _)| k.as_str() == "__cfx_async_retval").map(|(_, v)| v) {
+                        if let Value::FuncRef(ref async_ref) = async_retval {
+                                let async_ref = async_ref.clone();
+                                let shared_cb = std::rc::Rc::new(std::cell::RefCell::new(Some(callback)));
+                                let shared_cb2 = shared_cb.clone();
+                                let (cb_ref_str, _cb_ref_idx) = create_canonical_ref(Box::new(move |data: &[u8]| -> Vec<u8> {
+                                        let decoded = ensure_array(decode(data));
+                                        let val = match &decoded {
+                                                Value::Array(a) if !a.is_empty() => a[0].clone(),
+                                                _ => Value::Null,
+                                        };
+                                        if let Some(cb) = shared_cb2.borrow_mut().take() { cb(val); }
+                                        vec![0x90]
+                                }));
+                                if cb_ref_str.is_empty() {
+                                        if let Some(cb) = shared_cb.borrow_mut().take() { cb(Value::Null); }
+                                        return;
+                                }
+                                let payload = encode(&Value::Array(vec![Value::FuncRef(cb_ref_str)]));
+                                invoke_function_reference(&async_ref, &payload);
+                                return;
+                        }
+                }
+        }
+        callback(result);
 }
 
 fn resolve_export_ref(resource: &str, name: &str) -> String {
@@ -1005,6 +1060,50 @@ pub fn get_state_bag_value(bag: &str, key: &str) -> Value {
         let r = invoke_native_raw(hash_string(b"GET_STATE_BAG_VALUE"), &[NativeArg::ptr(bag_cs.as_ptr() as u64), NativeArg::ptr(key_cs.as_ptr() as u64)], 2, 0x1);
         let data = get_binary_result(&r, 0, 1);
         if data.is_empty() { Value::Null } else { decode(&data) }
+}
+
+pub fn state_bag_has_key(bag: &str, key: &str) -> bool {
+        let bag_cs = CString::new(bag).unwrap_or_default();
+        let key_cs = CString::new(key).unwrap_or_default();
+        invoke_native_bool(hash_string(b"STATE_BAG_HAS_KEY"), &[NativeArg::ptr(bag_cs.as_ptr() as u64), NativeArg::ptr(key_cs.as_ptr() as u64)])
+}
+
+pub fn get_state_bag_keys(bag: &str) -> Vec<String> {
+        let bag_cs = CString::new(bag).unwrap_or_default();
+        let r = invoke_native_raw(hash_string(b"GET_STATE_BAG_KEYS"), &[NativeArg::ptr(bag_cs.as_ptr() as u64)], 2, 0x1);
+        let data = get_binary_result(&r, 0, 1);
+        if data.is_empty() { return Vec::new(); }
+        let arr = decode(&data);
+        match arr {
+                Value::Array(a) => a.iter().map(|v| v.as_str().to_string()).collect(),
+                _ => Vec::new(),
+        }
+}
+
+pub fn set_player_state(server_id: i32, key: &str, value: &Value, replicated: bool) {
+        set_state_bag_value(&format!("player:{}", server_id), key, value, replicated);
+}
+
+pub fn get_player_state(server_id: i32, key: &str) -> Value {
+        get_state_bag_value(&format!("player:{}", server_id), key)
+}
+
+pub fn set_entity_state(net_id: i32, key: &str, value: &Value, replicated: bool) {
+        invoke_native_void(hash_string(b"ENSURE_ENTITY_STATE_BAG"), &[NativeArg::val(net_id as u32 as u64)]);
+        set_state_bag_value(&format!("entity:{}", net_id), key, value, replicated);
+}
+
+pub fn get_entity_state(net_id: i32, key: &str) -> Value {
+        invoke_native_void(hash_string(b"ENSURE_ENTITY_STATE_BAG"), &[NativeArg::val(net_id as u32 as u64)]);
+        get_state_bag_value(&format!("entity:{}", net_id), key)
+}
+
+pub fn set_global_state(key: &str, value: &Value, replicated: bool) {
+        set_state_bag_value("global", key, value, replicated);
+}
+
+pub fn get_global_state(key: &str) -> Value {
+        get_state_bag_value("global", key)
 }
 
 pub fn set_kvp(key: &str, value: &str) {
