@@ -1,19 +1,46 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ $# -eq 1 ]] || exit 2
+[[ $# -eq 1 ]] || { echo "Usage: build <source.cpp|source.rs>" >&2; exit 2; }
 
 SRC=$1
 [[ -f $SRC ]] || { echo "Error: Source not found: $SRC" >&2; exit 1; }
+
+SDK_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT=${SRC%.*}.wasm
 
-exec zig c++ \
-        -target wasm32-wasi \
-        -std=c++23 \
-        -O2 \
-        -fno-exceptions \
-        -mexec-model=reactor \
-        -I"$(cd "$(dirname "$0")/../.." && pwd)" \
-        -Wl,--export-memory \
-        "$SRC" \
-        -o "$OUT"
+case "$SRC" in
+        *.cpp)
+                exec zig c++ \
+                        -target wasm32-wasi \
+                        -std=c++23 \
+                        -O2 \
+                        -fno-exceptions \
+                        -mexec-model=reactor \
+                        -I"$SDK_DIR" \
+                        -Wl,--export-memory \
+                        "$SRC" \
+                        -o "$OUT"
+                ;;
+        *.rs)
+                RLIB="$SDK_DIR/build/libcfx.rlib"
+                RLIB_SRC="$SDK_DIR/include/RustScriptRuntime.rs"
+
+                if [[ ! -f "$RLIB" ]] || [[ "$RLIB_SRC" -nt "$RLIB" ]]; then
+                        mkdir -p "$(dirname "$RLIB")"
+                        rustc --crate-type rlib --crate-name cfx --edition 2021 -O \
+                                --target wasm32-wasip1 --cfg cfx_has_natives \
+                                "$RLIB_SRC" -o "$RLIB"
+                fi
+
+                exec rustc --crate-type cdylib --edition 2021 -O \
+                        --target wasm32-wasip1 \
+                        -C link-args=--export-memory \
+                        --extern cfx="$RLIB" \
+                        "$SRC" -o "$OUT"
+                ;;
+        *)
+                echo "Error: Unsupported file type: $SRC (expected .cpp or .rs)" >&2
+                exit 1
+                ;;
+esac

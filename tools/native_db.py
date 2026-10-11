@@ -56,6 +56,77 @@ PARAM_TYPE_MAP = {
         "Vector3*": "Vector3*",
 }
 
+RUST_PARAM_TYPE_MAP = {
+        "int": ("i32", "val", "{p} as u32 as u64"),
+        "float": ("f32", "val", "{p}.to_bits() as u64"),
+        "BOOL": ("bool", "val", "if {p} {{ 1u64 }} else {{ 0u64 }}"),
+        "char*": ("&str", "str", None),
+        "Hash": ("u32", "val", "{p} as u64"),
+        "Entity": ("i32", "val", "{p} as u32 as u64"),
+        "Player": ("i32", "val", "{p} as u32 as u64"),
+        "Vehicle": ("i32", "val", "{p} as u32 as u64"),
+        "Ped": ("i32", "val", "{p} as u32 as u64"),
+        "Object": ("i32", "val", "{p} as u32 as u64"),
+        "Pickup": ("i32", "val", "{p} as u32 as u64"),
+        "Blip": ("i32", "val", "{p} as u32 as u64"),
+        "Cam": ("i32", "val", "{p} as u32 as u64"),
+        "FireId": ("i32", "val", "{p} as u32 as u64"),
+        "Interior": ("i32", "val", "{p} as u32 as u64"),
+        "ScrHandle": ("i32", "val", "{p} as u32 as u64"),
+        "Any": ("i32", "val", "{p} as u32 as u64"),
+        "long": ("i64", "val", "{p} as u64"),
+        "int*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
+        "float*": ("&mut f32", "ptr", "{p} as *mut f32 as u64"),
+        "BOOL*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
+        "Hash*": ("&mut u32", "ptr", "{p} as *mut u32 as u64"),
+        "Entity*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
+        "Player*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
+        "Vehicle*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
+        "Ped*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
+        "Object*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
+        "Pickup*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
+        "Blip*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
+        "Cam*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
+        "FireId*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
+        "Interior*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
+        "ScrHandle*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
+        "Any*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
+        "long*": ("&mut i64", "ptr", "{p} as *mut i64 as u64"),
+        "Vector3*": ("&mut crate::Vector3", "ptr", "{p} as *mut crate::Vector3 as u64"),
+}
+
+RUST_RETURN_TYPE_MAP = {
+        "void": (None, "invoke_native_void"),
+        "int": ("i32", "invoke_native_int"),
+        "float": ("f32", "invoke_native_float"),
+        "BOOL": ("bool", "invoke_native_bool"),
+        "char*": ("String", "invoke_native_string"),
+        "Hash": ("u32", "invoke_native_int"),
+        "Entity": ("i32", "invoke_native_int"),
+        "Player": ("i32", "invoke_native_int"),
+        "Vehicle": ("i32", "invoke_native_int"),
+        "Ped": ("i32", "invoke_native_int"),
+        "Object": ("i32", "invoke_native_int"),
+        "Pickup": ("i32", "invoke_native_int"),
+        "Blip": ("i32", "invoke_native_int"),
+        "Cam": ("i32", "invoke_native_int"),
+        "FireId": ("i32", "invoke_native_int"),
+        "Interior": ("i32", "invoke_native_int"),
+        "ScrHandle": ("i32", "invoke_native_int"),
+        "Any": ("i32", "invoke_native_int"),
+        "long": ("i64", "invoke_native_i64"),
+        "Vector3": ("crate::Vector3", "invoke_native_vector3"),
+}
+
+RUST_KEYWORDS = {
+        "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else",
+        "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop",
+        "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static",
+        "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while",
+        "abstract", "become", "box", "do", "final", "macro", "override", "priv", "try",
+        "typeof", "unsized", "virtual", "yield", "union", "bool",
+}
+
 RETURN_TYPE_MAP = {
         "void": ("void", None),
         "int": ("int", "int"),
@@ -150,7 +221,7 @@ def fetch_json(url: str, no_cache: bool = False):
                         with open(cache_file) as f:
                                 return json.load(f)
         print(f"Fetching {url}...")
-        req = urllib.request.Request(url, headers={"User-Agent": "citizen-scripting-cpp-nativedb"})
+        req = urllib.request.Request(url, headers={"User-Agent": "citizen-scripting-wasm-nativedb"})
         with urllib.request.urlopen(req, timeout=30) as resp:
                 data = resp.read()
         os.makedirs(CACHE_DIR, exist_ok=True)
@@ -197,13 +268,92 @@ def parse_game_natives(data: dict) -> dict[str, list[dict]]:
         return dict(by_ns)
 
 
+def screaming_to_snake(name: str) -> str:
+        return name.lower()
+
+
+def to_safe_rust_param(name: str) -> str:
+        return name + "_" if name in RUST_KEYWORDS else name
+
+
+def generate_rust_wrapper(native: dict) -> str | None:
+        name = native.get("name")
+        if not name:
+                return None
+        hash_str = native.get("hash", "0x0")
+        params = native.get("params", [])
+        result_type = native.get("results", "void")
+        if result_type == "object" or result_type not in RUST_RETURN_TYPE_MAP:
+                return None
+
+        rust_ret, invoke_fn = RUST_RETURN_TYPE_MAP[result_type]
+        func_name = screaming_to_snake(name)
+
+        rust_params = []
+        cstring_decls = []
+        arg_exprs = []
+        skip = False
+        str_idx = 0
+
+        for p in params:
+                ptype = p.get("type", "int")
+                pname = to_safe_rust_param(p.get("name", "p").lower())
+                if ptype not in RUST_PARAM_TYPE_MAP:
+                        skip = True
+                        break
+                rtype, kind, expr_template = RUST_PARAM_TYPE_MAP[ptype]
+                rust_params.append(f"{pname}: {rtype}")
+                if kind == "str":
+                        var = f"_s{str_idx}"
+                        str_idx += 1
+                        cstring_decls.append(f"        let {var} = ::std::ffi::CString::new({pname}).unwrap_or_default();")
+                        arg_exprs.append(f"crate::NativeArg::ptr({var}.as_ptr() as u64)")
+                elif kind == "ptr":
+                        arg_exprs.append(f"crate::NativeArg::ptr({expr_template.format(p=pname)})")
+                else:
+                        arg_exprs.append(f"crate::NativeArg::val({expr_template.format(p=pname)})")
+        if skip:
+                return None
+
+        param_str = ", ".join(rust_params)
+        args_str = ", ".join(arg_exprs)
+        cstring_block = "\n".join(cstring_decls)
+        if cstring_block:
+                cstring_block += "\n"
+
+        if rust_ret is None:
+                sig = f"pub fn {func_name}({param_str})"
+                body = f"crate::{invoke_fn}({hash_str}, &[{args_str}]);"
+        elif result_type == "Hash":
+                sig = f"pub fn {func_name}({param_str}) -> u32"
+                body = f"crate::invoke_native_int({hash_str}, &[{args_str}]) as u32"
+        else:
+                sig = f"pub fn {func_name}({param_str}) -> {rust_ret}"
+                body = f"crate::{invoke_fn}({hash_str}, &[{args_str}])"
+
+        return f"    {sig} {{\n{cstring_block}        {body}\n    }}"
+
+
+def generate_rust_namespace_block(namespace: str, natives: list[dict]) -> tuple[str, str, int] | None:
+        wrappers = []
+        for n in sorted(natives, key=lambda x: x.get("name", "")):
+                w = generate_rust_wrapper(n)
+                if w:
+                        wrappers.append(w)
+        if not wrappers:
+                return None
+        body = "\n\n".join(wrappers)
+        ns_lower = namespace.lower()
+        return ns_lower, body, len(wrappers)
+
+
 def embed_sdk(base_dir, output):
-        files = ["include/CppScriptRuntime.h"]
-        native_dir = os.path.join(base_dir, "src", "natives")
-        if os.path.isdir(native_dir):
-                for f in sorted(os.listdir(native_dir)):
-                        if f.endswith(".h"):
-                                files.append(f"src/natives/{f}")
+        files = [
+                "include/CppScriptRuntime.h",
+                "include/RustScriptRuntime.rs",
+                "src/natives/all.h",
+                "src/natives/all.rs",
+        ]
         blob = struct.pack("<I", len(files))
         for rel_path in files:
                 with open(os.path.join(base_dir, rel_path), "rb") as f:
@@ -260,40 +410,44 @@ def main():
         for ns in all_ns:
                 all_ns[ns] = [n for n in all_ns[ns]
                                 if not n.get("name") or global_seen.get((n["name"], param_sig(n)), (None,))[0] == ns]
-        files = []
+        cpp_blocks = []
         total_count = 0
+        rust_modules = []
+        rust_total = 0
+        ns_count = 0
         for ns in sorted(all_ns.keys()):
                 natives = all_ns[ns]
                 result = generate_namespace_block(ns, natives)
-                if not result:
-                        continue
-                ns_lower, block, count = result
-                total_count += count
-                filename = ns_lower.replace(" ", "_") + ".h"
-                files.append((filename, ns_lower, count))
-                file_content = f"""// Auto-generated, do not edit.
-#pragma once
+                if result:
+                        ns_lower, block, count = result
+                        total_count += count
+                        cpp_blocks.append(block)
+                        ns_count += 1
+                        print(f"  {ns}: {count} C++ wrappers")
+                rust_result = generate_rust_namespace_block(ns, natives)
+                if rust_result:
+                        rs_lower, rs_body, rs_count = rust_result
+                        rust_total += rs_count
+                        rust_modules.append((rs_lower.replace(" ", "_"), rs_body))
+                        print(f"  {ns}: {rs_count} Rust wrappers")
 
-namespace fx::natives
-{{
+        for f in os.listdir(output_dir):
+                if f.endswith(".h") and f != "all.h":
+                        os.remove(os.path.join(output_dir, f))
 
-{block}
-
-}} // namespace fx::natives
-"""
-                with open(os.path.join(output_dir, filename), "w") as f:
-                        f.write(file_content)
-                print(f"  {ns}: {count} wrappers -> {filename}")
-
-        includes = "\n".join(f'#include "{fn}"' for fn, _, _ in files)
-        all_content = f"""// Auto-generated, do not edit.
-#pragma once
-
-{includes}
-"""
+        all_h = "// Auto-generated, do not edit.\n#pragma once\n\nnamespace fx::natives\n{\n\n"
+        all_h += "\n\n".join(cpp_blocks)
+        all_h += "\n\n} // namespace fx::natives\n"
         with open(os.path.join(output_dir, "all.h"), "w") as f:
-                f.write(all_content)
-        print(f"\nGenerated {total_count} wrappers across {len(files)} namespaces")
+                f.write(all_h)
+
+        rust_lines = ["// Auto-generated, do not edit.\n"]
+        for mod_name, mod_body in rust_modules:
+                rust_lines.append(f"pub mod {mod_name} {{\n{mod_body}\n}}\n")
+        with open(os.path.join(output_dir, "all.rs"), "w") as f:
+                f.write("\n".join(rust_lines))
+
+        print(f"\nGenerated {total_count} C++ wrappers, {rust_total} Rust wrappers across {ns_count} namespaces")
         print(f"Output: {output_dir}/")
 
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

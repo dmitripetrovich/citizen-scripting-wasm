@@ -3,7 +3,8 @@ game 'gta5'
 
 name 'example'
 author 'dmitripetrovich'
-description 'Example C++ resource.'
+description 'Example resource.'
 version '1.0.0'
 
 server_script 'server.cpp'
+server_script 'server.rs'

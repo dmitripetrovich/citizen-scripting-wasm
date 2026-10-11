@@ -11,17 +11,51 @@ cd "$PROJECT_DIR"
 rm -rf "$BUILD_DIR"
 
 premake5 --os=linux gmake
-make -C "$BUILD_DIR" -f citizen-scripting-cpp.make config=release \
+make -C "$BUILD_DIR" -f citizen-scripting-wasm.make config=release \
         CC="zig cc -target x86_64-linux-musl" \
         CXX="zig c++ -target x86_64-linux-musl" \
         -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || echo 4)" \
         2> >(grep -v "unable to open library directory '/usr/lib64'" >&2 || true)
 
-cp "$BUILD_DIR/bin/Release/libcitizen-scripting-cpp.so" "$SERVER_DIR/"
+cp "$BUILD_DIR/bin/Release/libcitizen-scripting-wasm.so" "$SERVER_DIR/"
+cp "$PROJECT_DIR/component.json" "$SERVER_DIR/libcitizen-scripting-wasm.json"
 
-rm -rf "$RESOURCE_DIR"
-mkdir -p "$RESOURCE_DIR"
-cp tools/example/server.cpp "$RESOURCE_DIR/server.cpp"
-cp tools/example/fxmanifest.lua "$RESOURCE_DIR/fxmanifest.lua"
+echo ""
+echo "Which example resource do you want to deploy?"
+echo "  1) C++"
+echo "  2) Rust"
+echo "  3) Skip (runtime only)"
+read -rp "> " choice
 
-echo "Done. Runtime -> $SERVER_DIR, resource -> $RESOURCE_DIR"
+MANIFEST_HEADER="fx_version 'cerulean'
+game 'gta5'
+
+name 'example'
+author 'dmitripetrovich'
+description 'DEPLOY_DESC'
+version '1.0.0'"
+
+case "$choice" in
+        1)
+                rm -rf "$RESOURCE_DIR"
+                mkdir -p "$RESOURCE_DIR"
+                cp tools/example/server.cpp "$RESOURCE_DIR/server.cpp"
+                printf '%s\n\nserver_script '\''server.cpp'\''\n' "${MANIFEST_HEADER/DEPLOY_DESC/Example C++ resource.}" > "$RESOURCE_DIR/fxmanifest.lua"
+                echo "Resource deployed (C++) -> $RESOURCE_DIR"
+                ;;
+        2)
+                rm -rf "$RESOURCE_DIR"
+                mkdir -p "$RESOURCE_DIR"
+                cp tools/example/server.rs "$RESOURCE_DIR/server.rs"
+                printf '%s\n\nserver_script '\''server.rs'\''\n' "${MANIFEST_HEADER/DEPLOY_DESC/Example Rust resource.}" > "$RESOURCE_DIR/fxmanifest.lua"
+                echo "Resource deployed (Rust) -> $RESOURCE_DIR"
+                ;;
+        3)
+                echo "Skipped resource deployment."
+                ;;
+        *)
+                echo "Invalid choice, skipping resource deployment."
+                ;;
+esac
+
+echo "Done. Runtime -> $SERVER_DIR"

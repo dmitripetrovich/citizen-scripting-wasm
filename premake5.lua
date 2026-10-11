@@ -1,15 +1,15 @@
 local component = dofile("component.lua")
 
-workspace "citizen-scripting-cpp"
+workspace "citizen-scripting-wasm"
         configurations { "Debug", "Release" }
         architecture "x86_64"
         language "C++"
         cppdialect "C++23"
         location "build"
 
-project "citizen-scripting-cpp"
+project "citizen-scripting-wasm"
         kind "SharedLib"
-        targetname "citizen-scripting-cpp"
+        targetname "citizen-scripting-wasm"
         targetprefix "lib"
         files {
                 "src/CppComponentHost.cpp",

@@ -1,5 +1,5 @@
 {
-        "name": "citizen:scripting:cpp",
+        "name": "citizen:scripting:wasm",
         "version": "0.1.0",
         "dependencies": [
                 "fx[2]",

@@ -78,6 +78,6 @@ Server
                 std::string name = fx::getCurrentResourceName();
                 fx::json::Value info = fx::callExport(name, "getPlayerInfo", { src });
                 fx::trace("[fx::addExport] %s\n", info.asStr("failed").c_str());
-                fx::callExport("fwa", "SendChatMessage", { src, "^#f0a0e4[INFO] ^#ffffffHello from ^#f0a0e4C++^#ffffff!" });
+                fx::callExport("fw", "SendChatMessage", { src, "^#f0a0e4[INFO] ^#ffffffHello from ^#f0a0e4C++^#ffffff!" });
         });
 }

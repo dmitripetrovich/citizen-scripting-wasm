@@ -74,7 +74,7 @@ static void Log(LogLevel level, const char* fmt, ...)
         va_list ap;
         va_start(ap, fmt);
         const char* color = level == LogLevel::Error ? "\033[31m" : level == LogLevel::Warning ? "\033[33m" : "\033[36m";
-        fprintf(stderr, "%s[citizen-scripting-cpp]\033[0m ", color);
+        fprintf(stderr, "%s[citizen-scripting-wasm]\033[0m ", color);
         vfprintf(stderr, fmt, ap);
         fputc('\n', stderr);
         va_end(ap);
@@ -1864,7 +1864,7 @@ int32_t OM_DECL CppScriptRuntime::HandlesFile(char* scriptFile, IScriptHostWithR
         if (!scriptFile)
                 return 0;
         std::string_view file(scriptFile);
-        if (file.ends_with(".wasm") || file.ends_with(".cpp"))
+        if (file.ends_with(".wasm") || file.ends_with(".cpp") || file.ends_with(".rs"))
                 return 1;
         return 0;
 }
@@ -1958,7 +1958,7 @@ static std::string getSdkPath()
         if (s_extracted)
                 return s_sdkPath;
         s_extracted = true;
-        char tmpl[] = "/tmp/citizen-scripting-cpp-sdk-XXXXXX";
+        char tmpl[] = "/tmp/citizen-scripting-wasm-sdk-XXXXXX";
         char* dir = mkdtemp(tmpl);
         if (!dir)
                 return { };
@@ -1982,6 +1982,49 @@ static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, 
         if (result.status != 0)
         {
                 LogError("Failed to compile '%s' in resource '%s' (exit %d):\n%s", cppPath.c_str(), resourceName.c_str(), result.status, result.output.c_str());
+                return false;
+        }
+        if (!result.output.empty())
+                LogInfo("[%s] %s", resourceName.c_str(), result.output.c_str());
+        return true;
+}
+
+static bool ensureRustRlib(const std::string& sdkPath)
+{
+        std::string rlib = sdkPath + "/libcfx.rlib";
+        std::string src = sdkPath + "/include/RustScriptRuntime.rs";
+        if (fileExists(rlib) && !isNewer(src, rlib))
+                return true;
+        std::string cmd = "rustc --crate-type rlib --crate-name cfx --edition 2021 -O --target wasm32-wasip1 --cfg cfx_has_natives";
+        cmd += " \"" + src + "\"";
+        cmd += " -o \"" + rlib + "\"";
+        cmd += " 2>&1";
+        auto result = fx::spawnProcess(cmd, 1048576, 120000);
+        if (result.status != 0)
+        {
+                LogError("Failed to compile Rust SDK rlib (exit %d):\n%s", result.status, result.output.c_str());
+                return false;
+        }
+        if (!result.output.empty())
+                LogInfo("[rust-sdk] %s", result.output.c_str());
+        return true;
+}
+
+static bool compileRust(const std::string& rsPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& resourceName)
+{
+        if (!ensureRustRlib(sdkPath))
+                return false;
+        std::string rlib = sdkPath + "/libcfx.rlib";
+        std::string cmd = "rustc --crate-type cdylib --edition 2021 -O --target wasm32-wasip1";
+        cmd += " -C link-args=--export-memory";
+        cmd += " --extern cfx=\"" + rlib + "\"";
+        cmd += " \"" + rsPath + "\"";
+        cmd += " -o \"" + wasmPath + "\"";
+        cmd += " 2>&1";
+        auto result = fx::spawnProcess(cmd, 1048576, 120000);
+        if (result.status != 0)
+        {
+                LogError("Failed to compile '%s' in resource '%s' (exit %d):\n%s", rsPath.c_str(), resourceName.c_str(), result.status, result.output.c_str());
                 return false;
         }
         if (!result.output.empty())
@@ -2054,7 +2097,7 @@ result_t OM_DECL CppScriptRuntime::LoadFile(char* scriptFile)
         m_scriptFile = scriptFile;
         std::string_view file(scriptFile);
         std::string wasmFile = resolvedPath;
-        if (file.ends_with(".cpp"))
+        if (file.ends_with(".cpp") || file.ends_with(".rs"))
         {
                 std::string sdkPath = getSdkPath();
                 if (sdkPath.empty())
@@ -2062,11 +2105,13 @@ result_t OM_DECL CppScriptRuntime::LoadFile(char* scriptFile)
                         LogError("Failed to extract embedded SDK for compilation");
                         return FX_E_INVALIDARG;
                 }
-                wasmFile = resolvedPath.substr(0, resolvedPath.size() - 4) + ".wasm";
+                size_t extLen = file.ends_with(".cpp") ? 4 : 3;
+                wasmFile = resolvedPath.substr(0, resolvedPath.size() - extLen) + ".wasm";
                 if (!fileExists(wasmFile) || isNewer(resolvedPath, wasmFile))
                 {
                         LogInfo("Compiling '%s' in resource '%s'...", scriptFile, m_resourceName.c_str());
-                        if (!compileCpp(resolvedPath, wasmFile, sdkPath, m_resourceName))
+                        bool ok = file.ends_with(".rs") ? compileRust(resolvedPath, wasmFile, sdkPath, m_resourceName) : compileCpp(resolvedPath, wasmFile, sdkPath, m_resourceName);
+                        if (!ok)
                                 return FX_E_INVALIDARG;
                 }
         }
