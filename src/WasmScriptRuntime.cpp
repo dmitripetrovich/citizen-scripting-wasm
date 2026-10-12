@@ -2086,6 +2086,60 @@ static void writeSdkStamp(const std::string& wasmPath)
         fclose(f);
 }
 
+static bool depsChanged(const std::string& wasmPath)
+{
+        FILE* f = fopen((wasmPath + ".d").c_str(), "rb");
+        if (!f)
+                return true;
+        std::string data;
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+                data.append(buf, n);
+        fclose(f);
+        size_t pos = data.find(": ");
+        if (pos == std::string::npos)
+                return true;
+        auto stale = [&](const std::string& dep)
+        {
+                return !fileExists(dep) || isNewer(dep, wasmPath);
+        };
+        std::string dep;
+        for (size_t i = pos + 2; i < data.size(); i++)
+        {
+                char c = data[i];
+                char next = i + 1 < data.size() ? data[i + 1] : '\0';
+                if (c == '\\' && (next == ' ' || next == '#'))
+                {
+                        dep += next;
+                        i++;
+                        continue;
+                }
+                if (c == '\\' && next == '\n')
+                {
+                        i++;
+                        c = ' ';
+                }
+                else if (c == '$' && next == '$')
+                {
+                        dep += '$';
+                        i++;
+                        continue;
+                }
+                if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
+                {
+                        dep += c;
+                        continue;
+                }
+                if (!dep.empty() && stale(dep))
+                        return true;
+                dep.clear();
+                if (c == '\n')
+                        break;
+        }
+        return !dep.empty() && stale(dep);
+}
+
 static bool processFailed(const fx::ProcessResult& result, std::string& reason)
 {
         if (result.status == -3)
@@ -2103,6 +2157,7 @@ static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, 
 {
         std::string cmd = "zig c++ -target wasm32-wasi -std=c++23 -O2 -fno-exceptions -mexec-model=reactor -Wl,--export-memory";
         cmd += " -I\"" + sdkPath + "\"";
+        cmd += " -MMD -MF \"" + wasmPath + ".d\"";
         cmd += " \"" + cppPath + "\"";
         cmd += " -o \"" + wasmPath + "\"";
         cmd += " 2>&1";
@@ -2178,7 +2233,7 @@ static bool compileRust(const std::string& rsPath, const std::string& wasmPath, 
         cmd += " -C link-args=--export-memory";
         cmd += " --extern cfx=\"" + rlib + "\"";
         cmd += " \"" + rsPath + "\"";
-        cmd += " -o \"" + wasmPath + "\"";
+        cmd += " --emit=link=\"" + wasmPath + "\",dep-info=\"" + wasmPath + ".d\"";
         cmd += " 2>&1";
         auto result = fx::spawnProcess(cmd, 1048576, 120000);
         std::string reason;
@@ -2267,7 +2322,7 @@ result_t OM_DECL WasmScriptRuntime::LoadFile(char* scriptFile)
                 }
                 size_t extLen = file.ends_with(".cpp") ? 4 : 3;
                 wasmFile = resolvedPath.substr(0, resolvedPath.size() - extLen) + ".wasm";
-                if (!fileExists(wasmFile) || isNewer(resolvedPath, wasmFile) || !isBuiltWithCurrentSdk(wasmFile))
+                if (!fileExists(wasmFile) || isNewer(resolvedPath, wasmFile) || depsChanged(wasmFile) || !isBuiltWithCurrentSdk(wasmFile))
                 {
                         LogInfo("Compiling '%s' in resource '%s'...", scriptFile, m_resourceName.c_str());
                         bool ok = file.ends_with(".rs") ? compileRust(resolvedPath, wasmFile, sdkPath, m_resourceName) : compileCpp(resolvedPath, wasmFile, sdkPath, m_resourceName);
