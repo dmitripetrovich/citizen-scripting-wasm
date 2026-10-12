@@ -2066,6 +2066,7 @@ static std::string getSdkPath()
         if (!dir)
                 return { };
         s_sdkPath = dir;
+        std::atexit([] { if (!s_sdkPath.empty()) removeTree(s_sdkPath); });
         if (!extractSdk(s_sdkPath))
         {
                 s_sdkPath.clear();
