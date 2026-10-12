@@ -396,8 +396,8 @@ impl<'a> MsgpackReader<'a> {
                         0xD3 => Value::Int(self.u64() as i64),
                         0xCA => Value::Float(f32::from_bits(self.u32()) as f64),
                         0xCB => Value::Float(f64::from_bits(self.u64())),
-                        0xDC => { let n = self.u16() as usize; let mut a = Vec::with_capacity(n.min(65536)); for _ in 0..n { a.push(self.read(depth+1)); } Value::Array(a) }
-                        0xDD => { let n = self.u32() as usize; let mut a = Vec::with_capacity(n.min(65536)); for _ in 0..n { a.push(self.read(depth+1)); } Value::Array(a) }
+                        0xDC => { let n = self.u16() as usize; if n > 65536 { self.error = true; return Value::Null; } let mut a = Vec::with_capacity(n); for _ in 0..n { a.push(self.read(depth+1)); } Value::Array(a) }
+                        0xDD => { let n = self.u32() as usize; if n > 65536 { self.error = true; return Value::Null; } let mut a = Vec::with_capacity(n); for _ in 0..n { a.push(self.read(depth+1)); } Value::Array(a) }
                         0xD4 => self.read_ext(1),
                         0xD5 => self.read_ext(2),
                         0xD6 => self.read_ext(4),
