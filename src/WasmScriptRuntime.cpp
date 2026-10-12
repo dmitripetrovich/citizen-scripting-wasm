@@ -1107,6 +1107,9 @@ static wasm_trap_t* CbPollWorker(void* env, wasmtime_caller_t* caller, const was
         int32_t outMax = args[2].of.i32;
         if (!mem.init(caller) || outMax <= 0 || !mem.check(outBuf, static_cast<size_t>(outMax)))
         {
+                if (state->thread.joinable())
+                        state->thread.join();
+                rt->m_workers.erase(it);
                 results[0] = I32Val(-2);
                 return nullptr;
         }
