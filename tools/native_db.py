@@ -315,7 +315,7 @@ def generate_rust_wrapper(native: dict) -> str | None:
                 if kind == "str":
                         var = f"_s{str_idx}"
                         str_idx += 1
-                        cstring_decls.append(f"        let {var} = ::std::ffi::CString::new({pname}).unwrap_or_default();")
+                        cstring_decls.append(f"                let {var} = ::std::ffi::CString::new({pname}).unwrap_or_default();")
                         arg_exprs.append(f"crate::NativeArg::ptr({var}.as_ptr() as u64)")
                 elif kind == "ptr":
                         arg_exprs.append(f"crate::NativeArg::ptr({expr_template.format(p=pname)})")
@@ -340,7 +340,7 @@ def generate_rust_wrapper(native: dict) -> str | None:
                 sig = f"pub fn {func_name}({param_str}) -> {rust_ret}"
                 body = f"crate::{invoke_fn}({hash_str}, &[{args_str}])"
 
-        return f"    {sig} {{\n{cstring_block}        {body}\n    }}"
+        return f"        {sig} {{\n{cstring_block}                {body}\n        }}"
 
 
 def generate_rust_namespace_block(namespace: str, natives: list[dict]) -> tuple[str, str, int] | None:

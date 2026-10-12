@@ -482,7 +482,6 @@ struct Context {
         export_ref_cache: HashMap<String, String>,
         http_callbacks: HashMap<i32, Box<dyn FnOnce(i32, String, String)>>,
         http_response_registered: bool,
-        epoch_ms: u64,
 }
 
 impl Context {
@@ -509,13 +508,14 @@ impl Context {
                         export_ref_cache: HashMap::new(),
                         http_callbacks: HashMap::new(),
                         http_response_registered: false,
-                        epoch_ms: 0,
                 }
         }
 
         fn now_ms(&self) -> u64 {
-                use std::time::{SystemTime, UNIX_EPOCH};
-                SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+                use std::time::Instant;
+                static EPOCH: GlobalCell<Option<Instant>> = GlobalCell::new(None);
+                let epoch = unsafe { (*EPOCH.get()).get_or_insert_with(Instant::now) };
+                epoch.elapsed().as_millis() as u64
         }
 
         fn add_timer(&mut self, ms: u32, interval_ms: u32, cb: Rc<dyn Fn()>) -> i32 {
