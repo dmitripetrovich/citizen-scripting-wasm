@@ -712,7 +712,6 @@ pub fn remove_event_handler(token: i32) {
         let event = match unsafe { (*c).handler_event_map.remove(&token) } { Some(e) => e, None => return };
         if let Some(vec) = unsafe { (*c).events.get_mut(&event) } {
                 vec.retain(|e| e.id != token);
-                if vec.is_empty() { unsafe { (*c).net_safe_events.remove(&event) }; }
         }
 }
 

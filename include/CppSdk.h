@@ -2106,8 +2106,6 @@ inline void removeEventHandler(int32_t token)
                           return e.id == token;
                   }),
         vec.end());
-        if (vec.empty())
-                c->netSafeEvents.erase(event);
 }
 
 template<typename... TArgs>
