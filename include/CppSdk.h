@@ -1703,7 +1703,7 @@ struct Context
                 if (it == events.end())
                         return;
                 std::string srcStr(src, srcLen);
-                if (srcStr.size() >= 4 && srcStr.compare(0, 4, "net:") == 0)
+                if (srcStr.starts_with("net:"))
                 {
                         if (netSafeEvents.find(key) == netSafeEvents.end())
                                 return;
@@ -3170,7 +3170,7 @@ void __cfx_init()
                 auto& cache = fx::detail::exportRefCache();
                 for (auto it = cache.begin(); it != cache.end(); )
                 {
-                        if (it->first.compare(0, prefix.size(), prefix) == 0)
+                        if (it->first.starts_with(prefix))
                                 it = cache.erase(it);
                         else
                                 ++it;
