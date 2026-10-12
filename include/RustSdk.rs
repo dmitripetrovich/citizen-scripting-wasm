@@ -1400,7 +1400,7 @@ pub mod runtime {
                 let c = ctx();
                 if unsafe { !(*c).events.contains_key(key) } { return; }
 
-                if src_str.len() >= 4 && &src_str[..4] == "net:" {
+                if src_str.starts_with("net:") {
                         if unsafe { !(*c).net_safe_events.contains(key) } { return; }
                 }
 
