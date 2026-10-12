@@ -386,7 +386,7 @@ def embed_sdk(base_dir, output):
 def main():
         import argparse
         parser = argparse.ArgumentParser()
-        parser.add_argument("--game", choices=list(GAME_URLS.keys()) + ["all"], nargs="*", default=["all"])
+        parser.add_argument("--game", choices=list(GAME_URLS.keys()) + ["all"], nargs="*", default=["fivem"])
         parser.add_argument("--output", default="src/natives")
         parser.add_argument("--embed", default="src/sdk.blob")
         parser.add_argument("--no-cache", action="store_true")

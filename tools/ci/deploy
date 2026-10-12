@@ -1,13 +1,54 @@
 #!/bin/bash
 set -euo pipefail
 
+usage() {
+        echo "Usage: tools/ci/deploy [--fivem] [--redm] [--cpp | --rust | --runtime-only]"
+        echo ""
+        echo "  --fivem, --redm Generate natives for these games (default: --fivem)"
+        echo "  --cpp Deploy the C++ example resource"
+        echo "  --rust Deploy the Rust example resource"
+        echo "  --runtime-only Deploy the runtime without an example resource"
+        echo ""
+        echo "Without --cpp, --rust or --runtime-only you're asked which example to deploy."
+}
+
+set_choice() {
+        if [ -n "$choice" ] && [ "$choice" != "$1" ]; then
+                echo "Only one of --cpp, --rust or --runtime-only can be given" >&2
+                exit 1
+        fi
+        choice="$1"
+}
+
 GAME_ARGS=()
+choice=""
 for arg in "$@"; do
         case "$arg" in
                 --fivem) GAME_ARGS+=(fivem) ;;
                 --redm) GAME_ARGS+=(redm) ;;
+                --cpp) set_choice 1 ;;
+                --rust) set_choice 2 ;;
+                --runtime-only) set_choice 3 ;;
+                -h|--help)
+                        usage
+                        exit 0
+                        ;;
+                *)
+                        echo "Unknown argument: $arg" >&2
+                        usage >&2
+                        exit 1
+                        ;;
         esac
 done
+
+if [ ${#GAME_ARGS[@]} -eq 0 ]; then
+        GAME_ARGS=(fivem)
+fi
+
+if [ -z "$choice" ] && [ ! -t 0 ] && [ -c /dev/stdin ]; then
+        echo "Error: Pass --cpp, --rust or --runtime-only" >&2
+        exit 1
+fi
 
 SERVER_DIR="${FX_SERVER_DIR:?Set FX_SERVER_DIR to your cfx-server directory}"
 RESOURCE_DIR="${FX_RESOURCE_DIR:?Set FX_RESOURCE_DIR to your resource directory}"
@@ -16,11 +57,7 @@ BUILD_DIR="$PROJECT_DIR/build"
 
 cd "$PROJECT_DIR"
 
-if [ ${#GAME_ARGS[@]} -gt 0 ]; then
-        python3 tools/native_db.py --game "${GAME_ARGS[@]}" --embed src/sdk.blob
-else
-        python3 tools/native_db.py --embed src/sdk.blob
-fi
+python3 tools/native_db.py --game "${GAME_ARGS[@]}" --embed src/sdk.blob
 
 rm -rf "$BUILD_DIR"
 
@@ -34,12 +71,17 @@ make -C "$BUILD_DIR" -f citizen-scripting-wasm.make config=release \
 cp "$BUILD_DIR/bin/Release/libcitizen-scripting-wasm.so" "$SERVER_DIR/"
 cp "$PROJECT_DIR/component.json" "$SERVER_DIR/libcitizen-scripting-wasm.json"
 
-echo ""
-echo "Which example resource do you want to deploy?"
-echo "  1) C++"
-echo "  2) Rust"
-echo "  3) Skip (runtime only)"
-read -rp "> " choice
+if [ -z "$choice" ]; then
+        echo ""
+        echo "Which example resource do you want to deploy?"
+        echo "  1) C++"
+        echo "  2) Rust"
+        echo "  3) Skip (runtime only)"
+        if ! read -rp "> " choice; then
+                echo "No answer on stdin, pass --cpp, --rust or --runtime-only" >&2
+                exit 1
+        fi
+fi
 
 MANIFEST_HEADER="fx_version 'cerulean'
 game 'gta5'
