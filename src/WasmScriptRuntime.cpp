@@ -2070,25 +2070,21 @@ static std::string getCachedSdkPath()
 static std::string getSdkPath()
 {
         static std::string s_sdkPath;
-        static bool s_extracted = false;
-        if (s_extracted)
-                return s_sdkPath;
-        s_extracted = true;
-        s_sdkPath = getCachedSdkPath();
-        if (!s_sdkPath.empty())
-                return s_sdkPath;
-        LogWarning("SDK cache directory is unavailable, extracting the SDK to a temporary directory");
-        char tmpl[] = "/tmp/citizen-scripting-wasm-sdk-XXXXXX";
-        char* dir = mkdtemp(tmpl);
-        if (!dir)
-                return { };
-        s_sdkPath = dir;
-        std::atexit([] { if (!s_sdkPath.empty()) removeTree(s_sdkPath); });
-        if (!extractSdk(s_sdkPath))
-        {
-                s_sdkPath.clear();
-                return { };
-        }
+        static std::once_flag s_once;
+        std::call_once(s_once, [] {
+                s_sdkPath = getCachedSdkPath();
+                if (!s_sdkPath.empty())
+                        return;
+                LogWarning("SDK cache directory is unavailable, extracting the SDK to a temporary directory");
+                char tmpl[] = "/tmp/citizen-scripting-wasm-sdk-XXXXXX";
+                char* dir = mkdtemp(tmpl);
+                if (!dir)
+                        return;
+                s_sdkPath = dir;
+                std::atexit([] { if (!s_sdkPath.empty()) removeTree(s_sdkPath); });
+                if (!extractSdk(s_sdkPath))
+                        s_sdkPath.clear();
+        });
         return s_sdkPath;
 }
 
