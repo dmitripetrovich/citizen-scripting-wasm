@@ -24,6 +24,12 @@ project "citizen-scripting-wasm"
         filter "configurations:Release"
                 optimize "On"
         filter {}
+        makesettings [[
+                .DEFAULT_GOAL := all
+                SDK_SOURCES = ../include/CppSdk.h ../include/RustSdk.rs ../src/natives/all.h ../src/natives/all.rs
+                ../src/sdk.blob: $(SDK_SOURCES) ; @echo Embedding SDK && python3 ../tools/native_db.py --embed-only --embed $@
+                obj/Debug/WasmScriptRuntime.o obj/Release/WasmScriptRuntime.o: ../src/sdk.blob
+        ]]
         postbuildcommands {
                 '{COPYFILE} "%{wks.location}/../component.json" "%{cfg.buildtarget.directory}/libcitizen-scripting-wasm.json"'
         }

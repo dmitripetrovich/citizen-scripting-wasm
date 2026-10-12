@@ -1971,6 +1971,40 @@ static std::string getSdkPath()
         return s_sdkPath;
 }
 
+static const std::string& getSdkHash()
+{
+        static const std::string s_hash = []
+        {
+                uint64_t h = 0xcbf29ce484222325ULL;
+                for (const unsigned char* p = g_sdkBlob; p != g_sdkBlobEnd; ++p)
+                        h = (h ^ *p) * 0x100000001b3ULL;
+                char buf[17];
+                snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(h));
+                return std::string(buf);
+        }();
+        return s_hash;
+}
+
+static bool isBuiltWithCurrentSdk(const std::string& wasmPath)
+{
+        FILE* f = fopen((wasmPath + ".sdk").c_str(), "rb");
+        if (!f)
+                return false;
+        char buf[17] = { };
+        size_t n = fread(buf, 1, 16, f);
+        fclose(f);
+        return n == 16 && getSdkHash() == buf;
+}
+
+static void writeSdkStamp(const std::string& wasmPath)
+{
+        FILE* f = fopen((wasmPath + ".sdk").c_str(), "wb");
+        if (!f)
+                return;
+        fwrite(getSdkHash().data(), 1, getSdkHash().size(), f);
+        fclose(f);
+}
+
 static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& resourceName)
 {
         std::string cmd = "zig c++ -target wasm32-wasi -std=c++23 -O2 -fno-exceptions -mexec-model=reactor -Wl,--export-memory";
@@ -2107,12 +2141,13 @@ result_t OM_DECL WasmScriptRuntime::LoadFile(char* scriptFile)
                 }
                 size_t extLen = file.ends_with(".cpp") ? 4 : 3;
                 wasmFile = resolvedPath.substr(0, resolvedPath.size() - extLen) + ".wasm";
-                if (!fileExists(wasmFile) || isNewer(resolvedPath, wasmFile))
+                if (!fileExists(wasmFile) || isNewer(resolvedPath, wasmFile) || !isBuiltWithCurrentSdk(wasmFile))
                 {
                         LogInfo("Compiling '%s' in resource '%s'...", scriptFile, m_resourceName.c_str());
                         bool ok = file.ends_with(".rs") ? compileRust(resolvedPath, wasmFile, sdkPath, m_resourceName) : compileCpp(resolvedPath, wasmFile, sdkPath, m_resourceName);
                         if (!ok)
                                 return FX_E_INVALIDARG;
+                        writeSdkStamp(wasmFile);
                 }
         }
         else if (!file.ends_with(".wasm"))

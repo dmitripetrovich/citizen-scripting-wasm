@@ -3017,6 +3017,7 @@ inline int32_t createWorker(const std::string& fnName, const std::string& input 
 inline WorkerResult pollWorker(int32_t workerId, int32_t maxOutput = 4096)
 {
         WorkerResult result{ };
+        maxOutput = std::clamp<int32_t>(maxOutput, 0, 1 << 20);
         std::string buf(static_cast<size_t>(maxOutput), '\0');
         int32_t raw = __cfxPollWorker(workerId, buf.data(), maxOutput);
         result.status = raw;

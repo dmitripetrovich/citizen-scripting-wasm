@@ -390,7 +390,12 @@ def main():
         parser.add_argument("--output", default="src/natives")
         parser.add_argument("--embed", default="src/sdk.blob")
         parser.add_argument("--no-cache", action="store_true")
+        parser.add_argument("--embed-only", action="store_true")
         args = parser.parse_args()
+        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        if args.embed_only:
+                embed_sdk(base_dir, args.embed)
+                return
         output_dir = args.output
         games = list(GAME_URLS.keys()) if "all" in args.game else args.game
         no_cache = args.no_cache
@@ -468,7 +473,6 @@ def main():
         print(f"\nGenerated {total_count} C++ wrappers, {rust_total} Rust wrappers across {ns_count} namespaces")
         print(f"Output: {output_dir}/")
 
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         embed_sdk(base_dir, args.embed)
 
 
