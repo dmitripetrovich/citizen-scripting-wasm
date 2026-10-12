@@ -202,12 +202,11 @@ struct WasmMem
                 if (bufMax > 0)
                 {
                         size_t copy = std::min<size_t>(data.size(), static_cast<size_t>(bufMax) - 1);
-                        if (check(bufPtr, copy + 1))
-                        {
-                                if (copy > 0)
-                                        memcpy(base + bufPtr, data.data(), copy);
-                                base[bufPtr + copy] = '\0';
-                        }
+                        if (!check(bufPtr, copy + 1))
+                                return 0;
+                        if (copy > 0)
+                                memcpy(base + bufPtr, data.data(), copy);
+                        base[bufPtr + copy] = '\0';
                 }
                 return static_cast<int32_t>(std::min<size_t>(data.size(), static_cast<size_t>(INT32_MAX)));
         }
