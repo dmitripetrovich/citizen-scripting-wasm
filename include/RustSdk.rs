@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::future::Future;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::task::{Poll, Waker, RawWaker, RawWakerVTable};
 struct GlobalCell<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for GlobalCell<T> {}
@@ -439,7 +440,7 @@ impl EventArgs {
         pub fn is_null(&self, i: usize) -> bool { self.inner.at(i).is_null() }
         pub fn func_ref(&self, i: usize) -> &str { self.inner.at(i).func_ref_str() }
 }
-type EventHandlerFn = Box<dyn Fn(&str, &EventArgs)>;
+type EventHandlerFn = Rc<dyn Fn(&str, &EventArgs)>;
 type RefCallbackFn = Box<dyn Fn(&[u8]) -> Vec<u8>>;
 
 struct EventHandlerEntry {
@@ -451,7 +452,7 @@ struct TimerEntry {
         id: i32,
         next_fire: u64, // ms since init
         interval_ms: u32,
-        callback: Box<dyn Fn()>,
+        callback: Rc<dyn Fn()>,
 }
 
 struct CoroutineEntry {
@@ -464,9 +465,9 @@ struct Context {
         events: HashMap<String, Vec<EventHandlerEntry>>,
         handler_event_map: HashMap<i32, String>,
         next_event_handler_id: i32,
-        ticks: HashMap<i32, Box<dyn Fn()>>,
+        ticks: HashMap<i32, Rc<dyn Fn()>>,
         next_tick_id: i32,
-        stops: HashMap<i32, Box<dyn Fn()>>,
+        stops: HashMap<i32, Rc<dyn Fn()>>,
         next_stop_id: i32,
         net_safe_events: HashSet<String>,
         timers: HashMap<i32, TimerEntry>,
@@ -517,7 +518,7 @@ impl Context {
                 SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
         }
 
-        fn add_timer(&mut self, ms: u32, interval_ms: u32, cb: Box<dyn Fn()>) -> i32 {
+        fn add_timer(&mut self, ms: u32, interval_ms: u32, cb: Rc<dyn Fn()>) -> i32 {
                 if self.timers.len() >= 8192 { return -1; }
                 let id = allocate_id(&mut self.next_timer_id, &self.timers);
                 if id < 0 { return -1; }
@@ -683,7 +684,7 @@ pub fn on(event: &str, handler: impl Fn(&str, &EventArgs) + 'static) -> i32 {
         if token < 0 { return -1; }
         c.events.entry(event.to_string()).or_default().push(EventHandlerEntry {
                 id: token,
-                handler: Box::new(handler),
+                handler: Rc::new(handler),
         });
         c.handler_event_map.insert(token, event.to_string());
         if is_new {
@@ -741,7 +742,7 @@ pub fn on_tick(handler: impl Fn() + 'static) -> i32 {
         let c = ctx();
         let id = allocate_id(&mut c.next_tick_id, &c.ticks);
         if id < 0 { return -1; }
-        c.ticks.insert(id, Box::new(handler));
+        c.ticks.insert(id, Rc::new(handler));
         id
 }
 
@@ -753,7 +754,7 @@ pub fn on_stop(handler: impl Fn() + 'static) -> i32 {
         let c = ctx();
         let id = allocate_id(&mut c.next_stop_id, &c.stops);
         if id < 0 { return -1; }
-        c.stops.insert(id, Box::new(handler));
+        c.stops.insert(id, Rc::new(handler));
         id
 }
 
@@ -762,11 +763,11 @@ pub fn remove_stop(id: i32) {
 }
 
 pub fn set_timeout(ms: u32, cb: impl Fn() + 'static) -> i32 {
-        ctx().add_timer(ms, 0, Box::new(cb))
+        ctx().add_timer(ms, 0, Rc::new(cb))
 }
 
 pub fn set_interval(ms: u32, cb: impl Fn() + 'static) -> i32 {
-        ctx().add_timer(ms, ms, Box::new(cb))
+        ctx().add_timer(ms, ms, Rc::new(cb))
 }
 
 pub fn clear_timer(id: i32) {
@@ -1362,21 +1363,22 @@ pub mod runtime {
                         .map(|(id, _)| *id)
                         .collect();
                 for id in expired {
+                        let c = ctx();
                         if let Some(timer) = c.timers.get_mut(&id) {
                                 if timer.interval_ms > 0 {
                                         let next = timer.next_fire + timer.interval_ms as u64;
                                         timer.next_fire = if next > now { next } else { now };
-                                        let cb = &timer.callback as *const Box<dyn Fn()>;
-                                        unsafe { (*cb)(); }
+                                        let cb = Rc::clone(&timer.callback);
+                                        cb();
                                 } else {
                                         let timer = c.timers.remove(&id).unwrap();
                                         (timer.callback)();
                                 }
                         }
                 }
-                let tick_snapshot: Vec<_> = c.ticks.values().map(|h| h as *const Box<dyn Fn()>).collect();
+                let tick_snapshot: Vec<Rc<dyn Fn()>> = ctx().ticks.values().map(Rc::clone).collect();
                 for h in tick_snapshot {
-                        unsafe { (*h)(); }
+                        h();
                 }
         }
 
@@ -1395,12 +1397,12 @@ pub mod runtime {
                 let decoded = ensure_array(decode(args_data));
                 let ea = EventArgs::new(decoded);
 
-                let handlers: Vec<*const EventHandlerFn> = c.events.get(key)
-                        .map(|v| v.iter().map(|e| &e.handler as *const EventHandlerFn).collect())
+                let handlers: Vec<EventHandlerFn> = c.events.get(key)
+                        .map(|v| v.iter().map(|e| Rc::clone(&e.handler)).collect())
                         .unwrap_or_default();
 
                 for h in handlers {
-                        unsafe { (*h)(src_str, &ea); }
+                        h(src_str, &ea);
                         if was_event_canceled() { break; }
                 }
         }
@@ -1414,9 +1416,9 @@ pub mod runtime {
                         invoke_native_void(hash_string(b"REMOVE_STATE_BAG_CHANGE_HANDLER"), &[NativeArg::val(cookie as u32 as u64)]);
                         remove_ref_idx(host_ref);
                 }
-                let snapshot: Vec<_> = c.stops.values().map(|h| h as *const Box<dyn Fn()>).collect();
+                let snapshot: Vec<Rc<dyn Fn()>> = c.stops.values().map(Rc::clone).collect();
                 for h in snapshot {
-                        unsafe { (*h)(); }
+                        h();
                 }
         }
 

@@ -1687,7 +1687,7 @@ result_t WasmScriptRuntime::loadWasm(const std::vector<uint8_t>& wasmBytes, cons
                 return FX_E_INVALIDARG;
         }
         {
-                std::string msg = "Warning: WebAssembly " + m_resourceName + "/" + m_scriptFile + " has been loaded into the c++ rt. This runtime is still in beta and shouldn't be used in production, crashes and breaking changes are to be expected.";
+                std::string msg = "Warning: WebAssembly " + m_resourceName + "/" + m_scriptFile + " has been loaded into the webassembly rt. This runtime is still in beta and shouldn't be used in production, crashes and breaking changes are to be expected.";
                 if (m_host.GetRef())
                         m_host->ScriptTrace(Mut(msg));
                 LogWarning("%s", msg.c_str());

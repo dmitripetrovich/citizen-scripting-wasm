@@ -1666,7 +1666,8 @@ struct Context
                         {
                                 auto next = it->second.nextFire + std::chrono::milliseconds(it->second.intervalMs);
                                 it->second.nextFire = (next > now) ? next : now;
-                                safeInvoke(it->second.callback, resourceName.c_str(), timerCtx);
+                                auto cb = it->second.callback;
+                                safeInvoke(cb, resourceName.c_str(), timerCtx);
                         }
                         else
                         {
