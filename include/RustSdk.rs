@@ -1157,12 +1157,14 @@ pub struct ProcessResult {
         pub status: i32,
         pub exit_code: i32,
         pub output: String,
+        pub ok: bool,
 }
 
 pub fn spawn_process(command: &str, max_output: i32) -> ProcessResult {
         let capped = if max_output <= 0 { 0 } else { max_output.min(1 << 20) as usize };
         let mut buf = vec![0u8; capped];
         let status = unsafe { __cfx_spawn_process(command.as_ptr(), command.len() as u32, buf.as_mut_ptr(), capped as i32) };
+        let ok = status >= 0;
         let output = if status > 0 {
                 buf.truncate(status as usize);
                 String::from_utf8(buf).unwrap_or_default()
@@ -1170,7 +1172,7 @@ pub fn spawn_process(command: &str, max_output: i32) -> ProcessResult {
                 String::new()
         };
         let exit_code = unsafe { __cfx_get_last_spawn_exit_code() };
-        ProcessResult { status, exit_code, output }
+        ProcessResult { status, exit_code, output, ok }
 }
 
 pub struct WorkerResult {

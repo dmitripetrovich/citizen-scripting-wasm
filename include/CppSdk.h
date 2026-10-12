@@ -28,9 +28,10 @@ namespace fx
 
 struct ProcessResult
 {
-        int32_t status; // bytes written on success, -1 permission denied, -2 error, -3 timeout
+        int32_t status = 0; // bytes written on success, -1 permission denied, -2 error, -3 timeout
         int32_t exitCode = 0;
         std::string output;
+        bool ok = false;
 };
 
 struct NativeCtx
@@ -2978,8 +2979,11 @@ inline ProcessResult spawnProcess(const std::string& command, int32_t maxOutput 
         ProcessResult result{ };
         std::string buf(static_cast<size_t>(maxOutput), '\0');
         result.status = __cfxSpawnProcess(command.c_str(), static_cast<uint32_t>(command.size()), buf.data(), maxOutput);
-        if (result.status > 0)
+        if (result.status >= 0)
+        {
+                result.ok = true;
                 buf.resize(static_cast<size_t>(result.status));
+        }
         else
                 buf.clear();
         result.output = std::move(buf);

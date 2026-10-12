@@ -382,10 +382,10 @@ struct OMImplementsDef
                 }                                                        \
         }
 
-#define FX_IMPLEMENTS(clsid, iface)            \
-        static OMImplementsDef _g_impl_##iface \
-        {                                      \
-                clsid, iface::GetIID()         \
+#define FX_IMPLEMENTS(clsid, iface)                    \
+        static OMImplementsDef _g_impl_##clsid##_##iface \
+        {                                                \
+                clsid, iface::GetIID()                   \
         }
 
 #include <chrono>
@@ -564,6 +564,7 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
                 result.status = -3;
                 return result;
         }
+        result.ok = true;
         result.status = static_cast<int32_t>(result.output.size());
         if (WIFEXITED(wstatus))
                 result.exitCode = WEXITSTATUS(wstatus);
