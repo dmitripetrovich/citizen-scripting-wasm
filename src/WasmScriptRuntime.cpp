@@ -13,7 +13,9 @@
 #include <atomic>
 #include <cstdarg>
 #include <cstdlib>
+#include <dirent.h>
 #include <dlfcn.h>
+#include <ftw.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -1933,7 +1935,6 @@ static bool extractSdk(const std::string& dir)
                 FILE* f = fopen(fullPath.c_str(), "wb");
                 if (!f)
                 {
-                        // try creating parent dirs from root
                         std::string path;
                         for (size_t j = 0; j < fullPath.size(); j++)
                         {
@@ -1951,6 +1952,96 @@ static bool extractSdk(const std::string& dir)
         return true;
 }
 
+static std::string fnv1aHex(const unsigned char* p, const unsigned char* end)
+{
+        uint64_t h = 0xcbf29ce484222325ULL;
+        for (; p != end; ++p)
+                h = (h ^ *p) * 0x100000001b3ULL;
+        char buf[17];
+        snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(h));
+        return buf;
+}
+
+static const std::string& getSdkHash()
+{
+        static const std::string s_hash = fnv1aHex(g_sdkBlob, g_sdkBlobEnd);
+        return s_hash;
+}
+
+static void removeTree(const std::string& path)
+{
+        nftw(path.c_str(), [](const char* p, const struct stat*, int, struct FTW*) { return remove(p); }, 16, FTW_DEPTH | FTW_PHYS);
+}
+
+static bool isPrivateDir(const std::string& path)
+{
+        struct stat st;
+        return lstat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode) && st.st_uid == geteuid() && (st.st_mode & (S_IWGRP | S_IWOTH)) == 0;
+}
+
+static std::string getSdkCacheRoot()
+{
+        std::string base;
+        if (const char* xdg = getenv("XDG_CACHE_HOME"); xdg && *xdg)
+                base = xdg;
+        else if (const char* home = getenv("HOME"); home && *home)
+                base = std::string(home) + "/.cache";
+        else
+                base = "/tmp";
+        mkdir(base.c_str(), 0700);
+        std::string root = base + "/citizen-scripting-wasm";
+        mkdir(root.c_str(), 0700);
+        return isPrivateDir(root) ? root : std::string();
+}
+
+static void pruneOldSdks(const std::string& root, const std::string& keep)
+{
+        DIR* d = opendir(root.c_str());
+        if (!d)
+                return;
+        time_t cutoff = time(nullptr) - 7 * 24 * 60 * 60;
+        while (dirent* e = readdir(d))
+        {
+                std::string_view name(e->d_name);
+                if (!name.starts_with("sdk-") || name == keep)
+                        continue;
+                std::string path = root + "/" + std::string(name);
+                struct stat st;
+                if (lstat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode) && st.st_mtime < cutoff)
+                        removeTree(path);
+        }
+        closedir(d);
+}
+
+static std::string getCachedSdkPath()
+{
+        std::string root = getSdkCacheRoot();
+        if (root.empty())
+                return { };
+        std::string name = "sdk-" + getSdkHash();
+        std::string path = root + "/" + name;
+        if (!isPrivateDir(path))
+        {
+                std::string tmp = path + ".tmp-XXXXXX";
+                if (!mkdtemp(tmp.data()))
+                        return { };
+                if (!extractSdk(tmp))
+                {
+                        removeTree(tmp);
+                        return { };
+                }
+                if (rename(tmp.c_str(), path.c_str()) != 0)
+                {
+                        removeTree(tmp);
+                        if (!isPrivateDir(path))
+                                return { };
+                }
+        }
+        utimensat(AT_FDCWD, path.c_str(), nullptr, 0);
+        pruneOldSdks(root, name);
+        return path;
+}
+
 static std::string getSdkPath()
 {
         static std::string s_sdkPath;
@@ -1958,6 +2049,10 @@ static std::string getSdkPath()
         if (s_extracted)
                 return s_sdkPath;
         s_extracted = true;
+        s_sdkPath = getCachedSdkPath();
+        if (!s_sdkPath.empty())
+                return s_sdkPath;
+        LogWarning("SDK cache directory is unavailable, extracting the SDK to a temporary directory");
         char tmpl[] = "/tmp/citizen-scripting-wasm-sdk-XXXXXX";
         char* dir = mkdtemp(tmpl);
         if (!dir)
@@ -1969,20 +2064,6 @@ static std::string getSdkPath()
                 return { };
         }
         return s_sdkPath;
-}
-
-static const std::string& getSdkHash()
-{
-        static const std::string s_hash = []
-        {
-                uint64_t h = 0xcbf29ce484222325ULL;
-                for (const unsigned char* p = g_sdkBlob; p != g_sdkBlobEnd; ++p)
-                        h = (h ^ *p) * 0x100000001b3ULL;
-                char buf[17];
-                snprintf(buf, sizeof(buf), "%016llx", static_cast<unsigned long long>(h));
-                return std::string(buf);
-        }();
-        return s_hash;
 }
 
 static bool isBuiltWithCurrentSdk(const std::string& wasmPath)
@@ -2005,6 +2086,19 @@ static void writeSdkStamp(const std::string& wasmPath)
         fclose(f);
 }
 
+static bool processFailed(const fx::ProcessResult& result, std::string& reason)
+{
+        if (result.status == -3)
+                reason = "timed out";
+        else if (result.status < 0)
+                reason = "could not be started";
+        else if (result.exitCode != 0)
+                reason = "exit " + std::to_string(result.exitCode);
+        else
+                return false;
+        return true;
+}
+
 static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& resourceName)
 {
         std::string cmd = "zig c++ -target wasm32-wasi -std=c++23 -O2 -fno-exceptions -mexec-model=reactor -Wl,--export-memory";
@@ -2013,9 +2107,10 @@ static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, 
         cmd += " -o \"" + wasmPath + "\"";
         cmd += " 2>&1";
         auto result = fx::spawnProcess(cmd, 1048576, 60000);
-        if (result.status != 0)
+        std::string reason;
+        if (processFailed(result, reason))
         {
-                LogError("Failed to compile '%s' in resource '%s' (exit %d):\n%s", cppPath.c_str(), resourceName.c_str(), result.status, result.output.c_str());
+                LogError("Failed to compile '%s' in resource '%s' (%s):\n%s", cppPath.c_str(), resourceName.c_str(), reason.c_str(), result.output.c_str());
                 return false;
         }
         if (!result.output.empty())
@@ -2023,32 +2118,62 @@ static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, 
         return true;
 }
 
-static bool ensureRustRlib(const std::string& sdkPath)
+static const std::string& getRustcHash()
 {
-        std::string rlib = sdkPath + "/libcfx.rlib";
+        static std::string s_hash;
+        if (s_hash.empty())
+        {
+                auto result = fx::spawnProcess("rustc -vV 2>&1", 65536, 10000);
+                std::string reason;
+                if (!processFailed(result, reason))
+                        s_hash = fnv1aHex(reinterpret_cast<const unsigned char*>(result.output.data()), reinterpret_cast<const unsigned char*>(result.output.data() + result.output.size()));
+        }
+        return s_hash;
+}
+
+static std::string ensureRustRlib(const std::string& sdkPath)
+{
+        const std::string& rustcHash = getRustcHash();
+        if (rustcHash.empty())
+        {
+                LogError("Failed to run 'rustc -vV', is Rust installed and on PATH?");
+                return { };
+        }
+        std::string dir = sdkPath + "/rust-" + rustcHash;
+        std::string rlib = dir + "/libcfx.rlib";
         std::string src = sdkPath + "/include/RustSdk.rs";
         if (fileExists(rlib) && !isNewer(src, rlib))
-                return true;
+                return rlib;
+        mkdir(dir.c_str(), 0700);
+        std::string tmp = rlib + ".tmp-" + std::to_string(getpid());
         std::string cmd = "rustc --crate-type rlib --crate-name cfx --edition 2021 -O --target wasm32-wasip1 --cfg cfx_has_natives";
         cmd += " \"" + src + "\"";
-        cmd += " -o \"" + rlib + "\"";
+        cmd += " -o \"" + tmp + "\"";
         cmd += " 2>&1";
         auto result = fx::spawnProcess(cmd, 1048576, 120000);
-        if (result.status != 0)
+        std::string reason;
+        if (processFailed(result, reason))
         {
-                LogError("Failed to compile Rust SDK rlib (exit %d):\n%s", result.status, result.output.c_str());
-                return false;
+                unlink(tmp.c_str());
+                LogError("Failed to compile Rust SDK rlib (%s):\n%s", reason.c_str(), result.output.c_str());
+                return { };
         }
         if (!result.output.empty())
                 LogInfo("[rust-sdk] %s", result.output.c_str());
-        return true;
+        if (rename(tmp.c_str(), rlib.c_str()) != 0)
+        {
+                unlink(tmp.c_str());
+                LogError("Failed to move Rust SDK rlib into place: %s", strerror(errno));
+                return { };
+        }
+        return rlib;
 }
 
 static bool compileRust(const std::string& rsPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& resourceName)
 {
-        if (!ensureRustRlib(sdkPath))
+        std::string rlib = ensureRustRlib(sdkPath);
+        if (rlib.empty())
                 return false;
-        std::string rlib = sdkPath + "/libcfx.rlib";
         std::string cmd = "rustc --crate-type cdylib --edition 2021 -O --target wasm32-wasip1";
         cmd += " -C link-args=--export-memory";
         cmd += " --extern cfx=\"" + rlib + "\"";
@@ -2056,9 +2181,10 @@ static bool compileRust(const std::string& rsPath, const std::string& wasmPath, 
         cmd += " -o \"" + wasmPath + "\"";
         cmd += " 2>&1";
         auto result = fx::spawnProcess(cmd, 1048576, 120000);
-        if (result.status != 0)
+        std::string reason;
+        if (processFailed(result, reason))
         {
-                LogError("Failed to compile '%s' in resource '%s' (exit %d):\n%s", rsPath.c_str(), resourceName.c_str(), result.status, result.output.c_str());
+                LogError("Failed to compile '%s' in resource '%s' (%s):\n%s", rsPath.c_str(), resourceName.c_str(), reason.c_str(), result.output.c_str());
                 return false;
         }
         if (!result.output.empty())
