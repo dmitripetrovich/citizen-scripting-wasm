@@ -3376,6 +3376,19 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         std::unordered_map<int32_t, uint64_t> m_wasmToHostBookmark;
         std::unordered_map<uint64_t, int32_t> m_hostToWasmBookmark;
         uint64_t m_nextWasmHostBookmarkId = 1;
+
+    public:
+        struct CompileJob
+        {
+                std::string wasmFile;
+                bool ok = false;
+                std::atomic<bool> done{ false };
+        };
+
+    private:
+        std::shared_ptr<CompileJob> m_compileJob;
+        std::string m_compileRoot;
+        void finishCompile();
         void defineImports();
         bool resolveExports();
         void destroyWasm();

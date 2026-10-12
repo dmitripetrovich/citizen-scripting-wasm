@@ -441,7 +441,7 @@ inline const std::vector<std::string>& cachedFilteredEnv()
         return s_env;
 }
 
-inline ProcessResult spawnProcess(const std::string& command, size_t maxOutputBytes = 1048576, int timeoutMs = 30000)
+inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv, bool searchPath, size_t maxOutputBytes, int timeoutMs)
 {
         ProcessResult result{ };
         int pipefd[2];
@@ -462,15 +462,15 @@ inline ProcessResult spawnProcess(const std::string& command, size_t maxOutputBy
         posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
         posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDERR_FILENO);
         posix_spawn_file_actions_addclose(&actions, pipefd[1]);
-        const char* argv[] = { "sh", "-c", command.c_str(), nullptr };
         pid_t pid = 0;
-        int spawnErr = posix_spawn(&pid, "/bin/sh", &actions, nullptr, const_cast<char**>(argv), envp.data());
+        int spawnErr = searchPath ? posix_spawnp(&pid, path, &actions, nullptr, const_cast<char**>(argv), envp.data()) : posix_spawn(&pid, path, &actions, nullptr, const_cast<char**>(argv), envp.data());
         posix_spawn_file_actions_destroy(&actions);
         if (spawnErr != 0)
         {
                 close(pipefd[0]);
                 close(pipefd[1]);
                 result.status = -2;
+                result.output = std::string("failed to run '") + path + "': " + strerror(spawnErr);
                 return result;
         }
         close(pipefd[1]);
@@ -572,6 +572,27 @@ inline ProcessResult spawnProcess(const std::string& command, size_t maxOutputBy
         else
                 result.exitCode = -1;
         return result;
+}
+
+inline ProcessResult spawnProcess(const std::string& command, size_t maxOutputBytes = 1048576, int timeoutMs = 30000)
+{
+        const char* argv[] = { "sh", "-c", command.c_str(), nullptr };
+        return spawnProcessImpl("/bin/sh", argv, false, maxOutputBytes, timeoutMs);
+}
+
+inline ProcessResult spawnProgram(const std::vector<std::string>& args, size_t maxOutputBytes = 1048576, int timeoutMs = 30000)
+{
+        if (args.empty())
+        {
+                ProcessResult result{ };
+                result.status = -2;
+                return result;
+        }
+        std::vector<const char*> argv;
+        for (const auto& a : args)
+                argv.push_back(a.c_str());
+        argv.push_back(nullptr);
+        return spawnProcessImpl(argv[0], argv.data(), true, maxOutputBytes, timeoutMs);
 }
 
 }

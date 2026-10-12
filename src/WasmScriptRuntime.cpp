@@ -76,9 +76,11 @@ static void Log(LogLevel level, const char* fmt, ...)
         va_list ap;
         va_start(ap, fmt);
         const char* color = level == LogLevel::Error ? "\033[31m" : level == LogLevel::Warning ? "\033[33m" : "\033[36m";
+        flockfile(stderr);
         fprintf(stderr, "%s[citizen-scripting-wasm]\033[0m ", color);
         vfprintf(stderr, fmt, ap);
         fputc('\n', stderr);
+        funlockfile(stderr);
         va_end(ap);
 }
 
@@ -1199,6 +1201,7 @@ result_t OM_DECL WasmScriptRuntime::Destroy()
                 refuelWasm();
                 callVoid(m_fnStop);
         }
+        m_compileJob = nullptr;
         m_refs.clear();
         m_refToCallbackId.clear();
         destroyWasm();
@@ -1556,6 +1559,8 @@ static struct OrphanedWorkerList
         }
 } g_orphanedWorkers;
 
+static std::atomic<bool> g_serverTicking{ false };
+
 void WasmScriptRuntime::destroyWasm()
 {
         g_orphanedWorkers.reap();
@@ -1693,6 +1698,9 @@ result_t WasmScriptRuntime::loadWasm(const std::vector<uint8_t>& wasmBytes, cons
 result_t OM_DECL WasmScriptRuntime::Tick()
 {
         g_orphanedWorkers.reap();
+        g_serverTicking.store(true, std::memory_order_relaxed);
+        if (m_compileJob && m_compileJob->done.load(std::memory_order_acquire))
+                finishCompile();
         if (!m_hasTickFn)
                 return FX_S_OK;
         refuelWasm();
@@ -2155,13 +2163,8 @@ static bool processFailed(const fx::ProcessResult& result, std::string& reason)
 
 static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& resourceName)
 {
-        std::string cmd = "zig c++ -target wasm32-wasi -std=c++23 -O2 -fno-exceptions -mexec-model=reactor -Wl,--export-memory";
-        cmd += " -I\"" + sdkPath + "\"";
-        cmd += " -MMD -MF \"" + wasmPath + ".d\"";
-        cmd += " \"" + cppPath + "\"";
-        cmd += " -o \"" + wasmPath + "\"";
-        cmd += " 2>&1";
-        auto result = fx::spawnProcess(cmd, 1048576, 60000);
+        auto result = fx::spawnProgram({ "zig", "c++", "-target", "wasm32-wasi", "-std=c++23", "-O2", "-fno-exceptions", "-mexec-model=reactor", "-Wl,--export-memory",
+                "-I" + sdkPath, "-MMD", "-MF", wasmPath + ".d", cppPath, "-o", wasmPath }, 1048576, 60000);
         std::string reason;
         if (processFailed(result, reason))
         {
@@ -2178,7 +2181,7 @@ static const std::string& getRustcHash()
         static std::string s_hash;
         if (s_hash.empty())
         {
-                auto result = fx::spawnProcess("rustc -vV 2>&1", 65536, 10000);
+                auto result = fx::spawnProgram({ "rustc", "-vV" }, 65536, 10000);
                 std::string reason;
                 if (!processFailed(result, reason))
                         s_hash = fnv1aHex(reinterpret_cast<const unsigned char*>(result.output.data()), reinterpret_cast<const unsigned char*>(result.output.data() + result.output.size()));
@@ -2188,6 +2191,8 @@ static const std::string& getRustcHash()
 
 static std::string ensureRustRlib(const std::string& sdkPath)
 {
+        static std::mutex s_mutex;
+        std::lock_guard<std::mutex> lk(s_mutex);
         const std::string& rustcHash = getRustcHash();
         if (rustcHash.empty())
         {
@@ -2201,11 +2206,8 @@ static std::string ensureRustRlib(const std::string& sdkPath)
                 return rlib;
         mkdir(dir.c_str(), 0700);
         std::string tmp = rlib + ".tmp-" + std::to_string(getpid());
-        std::string cmd = "rustc --crate-type rlib --crate-name cfx --edition 2021 -O --target wasm32-wasip1 --cfg cfx_has_natives";
-        cmd += " \"" + src + "\"";
-        cmd += " -o \"" + tmp + "\"";
-        cmd += " 2>&1";
-        auto result = fx::spawnProcess(cmd, 1048576, 120000);
+        auto result = fx::spawnProgram({ "rustc", "--crate-type", "rlib", "--crate-name", "cfx", "--edition", "2021", "-O", "--target", "wasm32-wasip1", "--cfg", "cfx_has_natives",
+                src, "-o", tmp }, 1048576, 120000);
         std::string reason;
         if (processFailed(result, reason))
         {
@@ -2229,13 +2231,7 @@ static bool compileRust(const std::string& rsPath, const std::string& wasmPath, 
         std::string rlib = ensureRustRlib(sdkPath);
         if (rlib.empty())
                 return false;
-        std::string cmd = "rustc --crate-type cdylib --edition 2021 -O --target wasm32-wasip1";
-        cmd += " -C link-args=--export-memory";
-        cmd += " --extern cfx=\"" + rlib + "\"";
-        cmd += " \"" + rsPath + "\"";
-        cmd += " --emit=link=\"" + wasmPath + "\",dep-info=\"" + wasmPath + ".d\"";
-        cmd += " 2>&1";
-        auto result = fx::spawnProcess(cmd, 1048576, 120000);
+        auto result = fx::spawnProgram({ "rustc", "--crate-type", "cdylib", "--edition", "2021", "-O", "--target", "wasm32-wasip1", "-C", "link-args=--export-memory", "--extern", "cfx=" + rlib, rsPath, "--emit=link=" + wasmPath + ",dep-info=" + wasmPath + ".d" }, 1048576, 120000);
         std::string reason;
         if (processFailed(result, reason))
         {
@@ -2286,6 +2282,42 @@ static bool ReadFileBytes(const std::string& path, const std::string& resolvedRo
         return ok;
 }
 
+static std::mutex g_compileJobsMutex;
+static std::unordered_map<std::string, std::shared_ptr<WasmScriptRuntime::CompileJob>> g_compileJobs;
+
+static bool compileResource(const std::string& sourcePath, const std::string& wasmFile, const std::string& sdkPath, const std::string& resourceName, bool rust)
+{
+        bool ok = rust ? compileRust(sourcePath, wasmFile, sdkPath, resourceName) : compileCpp(sourcePath, wasmFile, sdkPath, resourceName);
+        if (ok)
+                writeSdkStamp(wasmFile);
+        return ok;
+}
+
+static void RunCompileJob(std::shared_ptr<WasmScriptRuntime::CompileJob> job, std::string sourcePath, std::string sdkPath, std::string resourceName, bool rust)
+{
+        job->ok = compileResource(sourcePath, job->wasmFile, sdkPath, resourceName, rust);
+        {
+                std::lock_guard<std::mutex> lk(g_compileJobsMutex);
+                g_compileJobs.erase(job->wasmFile);
+        }
+        job->done.store(true, std::memory_order_release);
+}
+
+void WasmScriptRuntime::finishCompile()
+{
+        std::shared_ptr<CompileJob> job = std::move(m_compileJob);
+        m_compileJob = nullptr;
+        if (!job->ok)
+                return;
+        std::vector<uint8_t> wasmBytes;
+        if (!ReadFileBytes(job->wasmFile, m_compileRoot, wasmBytes))
+        {
+                LogError("Failed to read '%s'", job->wasmFile.c_str());
+                return;
+        }
+        loadWasm(wasmBytes, job->wasmFile);
+}
+
 result_t OM_DECL WasmScriptRuntime::LoadFile(char* scriptFile)
 {
         if (!m_host.GetRef() || !scriptFile)
@@ -2322,13 +2354,40 @@ result_t OM_DECL WasmScriptRuntime::LoadFile(char* scriptFile)
                 }
                 size_t extLen = file.ends_with(".cpp") ? 4 : 3;
                 wasmFile = resolvedPath.substr(0, resolvedPath.size() - extLen) + ".wasm";
-                if (!fileExists(wasmFile) || isNewer(resolvedPath, wasmFile) || depsChanged(wasmFile) || !isBuiltWithCurrentSdk(wasmFile))
+                bool stale = !fileExists(wasmFile) || isNewer(resolvedPath, wasmFile) || depsChanged(wasmFile) || !isBuiltWithCurrentSdk(wasmFile);
+                if (stale && !g_serverTicking.load(std::memory_order_relaxed))
                 {
                         LogInfo("Compiling '%s' in resource '%s'...", scriptFile, m_resourceName.c_str());
-                        bool ok = file.ends_with(".rs") ? compileRust(resolvedPath, wasmFile, sdkPath, m_resourceName) : compileCpp(resolvedPath, wasmFile, sdkPath, m_resourceName);
-                        if (!ok)
+                        if (!compileResource(resolvedPath, wasmFile, sdkPath, m_resourceName, file.ends_with(".rs")))
                                 return FX_E_INVALIDARG;
-                        writeSdkStamp(wasmFile);
+                }
+                else if (stale)
+                {
+                        LogInfo("Compiling '%s' in resource '%s' in the background...", scriptFile, m_resourceName.c_str());
+                        std::shared_ptr<CompileJob> job;
+                        {
+                                std::lock_guard<std::mutex> lk(g_compileJobsMutex);
+                                auto& slot = g_compileJobs[wasmFile];
+                                if (!slot)
+                                {
+                                        slot = std::make_shared<CompileJob>();
+                                        slot->wasmFile = wasmFile;
+                                        try
+                                        {
+                                                std::thread(RunCompileJob, slot, resolvedPath, sdkPath, m_resourceName, file.ends_with(".rs")).detach();
+                                        }
+                                        catch (...)
+                                        {
+                                                g_compileJobs.erase(wasmFile);
+                                                LogError("Failed to start compile thread for '%s' in resource '%s'", scriptFile, m_resourceName.c_str());
+                                                return FX_E_INVALIDARG;
+                                        }
+                                }
+                                job = slot;
+                        }
+                        m_compileJob = std::move(job);
+                        m_compileRoot = resolvedRoot;
+                        return FX_S_OK;
                 }
         }
         else if (!file.ends_with(".wasm"))
