@@ -1515,10 +1515,27 @@ static struct OrphanedWorkerList
 
         ~OrphanedWorkerList()
         {
+                auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
                 std::lock_guard<std::mutex> lk(mutex);
                 for (auto& e : entries)
-                        if (e.thread.joinable())
+                {
+                        if (!e.thread.joinable())
+                                continue;
+                        bool done = false;
+                        while (!done && std::chrono::steady_clock::now() < deadline)
+                        {
+                                {
+                                        std::lock_guard<std::mutex> slk(e.state->mutex);
+                                        done = e.state->status != WasmScriptRuntime::WorkerState::Running;
+                                }
+                                if (!done)
+                                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                        }
+                        if (done)
                                 e.thread.join();
+                        else
+                                e.thread.detach();
+                }
         }
 
         void reap()
