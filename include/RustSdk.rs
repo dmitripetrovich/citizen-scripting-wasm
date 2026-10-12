@@ -1383,8 +1383,10 @@ pub mod runtime {
         }
 
         pub fn on_event(name: *const u8, name_len: u32, args: *const u8, args_len: u32, src: *const u8, src_len: u32) {
-                let key = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name, name_len as usize)) };
-                let src_str = unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(src, src_len as usize)) };
+                let name_bytes = unsafe { std::slice::from_raw_parts(name, name_len as usize) };
+                let key = match std::str::from_utf8(name_bytes) { Ok(s) => s, Err(_) => return };
+                let src_bytes = unsafe { std::slice::from_raw_parts(src, src_len as usize) };
+                let src_str = match std::str::from_utf8(src_bytes) { Ok(s) => s, Err(_) => return };
                 let args_data = unsafe { std::slice::from_raw_parts(args, args_len as usize) };
 
                 let c = ctx();
