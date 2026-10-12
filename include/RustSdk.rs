@@ -19,8 +19,8 @@ static CTX: GlobalCell<Option<Context>> = GlobalCell::new(None);
 static CORO_WAIT_MS: GlobalCell<i64> = GlobalCell::new(0);
 
 #[inline]
-fn ctx() -> &'static mut Context {
-        unsafe { (*CTX.get()).as_mut().expect("cfx: context not initialized") }
+fn ctx() -> *mut Context {
+        unsafe { (*CTX.get()).as_mut().expect("cfx: context not initialized") as *mut Context }
 }
 
 pub const fn hash_string(s: &[u8]) -> u64 {
@@ -538,7 +538,7 @@ fn noop_waker() -> Waker {
 fn resume_coroutine_by_id(id: i32) {
         unsafe { *CORO_WAIT_MS.get() = 0; }
         let c = ctx();
-        let mut entry = match c.coroutines.remove(&id) {
+        let mut entry = match unsafe { (*c).coroutines.remove(&id) } {
                 Some(e) => e,
                 None => return,
         };
@@ -548,21 +548,21 @@ fn resume_coroutine_by_id(id: i32) {
                 Poll::Ready(()) => {}
                 Poll::Pending => {
                         let wait_ms = unsafe { *CORO_WAIT_MS.get() };
-                        let now = ctx().now_ms();
+                        let now = unsafe { (*c).now_ms() };
                         entry.resume_at = if wait_ms > 0 { now + wait_ms as u64 } else { now };
                         let deadline = if wait_ms <= 0 { 0 } else if wait_ms > i32::MAX as i64 { i32::MAX } else { wait_ms as i32 };
                         unsafe { __cfx_schedule_bookmark(id, deadline); }
-                        ctx().coroutines.insert(id, entry);
+                        unsafe { (*c).coroutines.insert(id, entry) };
                 }
         }
 }
 
 fn create_ref(cb: RefCallbackFn) -> i32 {
         let c = ctx();
-        let id = allocate_id(&mut c.next_callback_id, &c.ref_callbacks);
+        let id = unsafe { allocate_id(&mut (*c).next_callback_id, &(*c).ref_callbacks) };
         if id < 0 { return -1; }
-        c.ref_callbacks.insert(id, cb);
-        c.ref_counts.insert(id, 1);
+        unsafe { (*c).ref_callbacks.insert(id, cb) };
+        unsafe { (*c).ref_counts.insert(id, 1) };
         unsafe { __cfx_create_ref(id) }
 }
 
@@ -679,14 +679,14 @@ pub fn trace_str(msg: &str) {
 
 pub fn on(event: &str, handler: impl Fn(&str, &EventArgs) + 'static) -> i32 {
         let c = ctx();
-        let is_new = !c.events.contains_key(event);
-        let token = allocate_id(&mut c.next_event_handler_id, &c.handler_event_map);
+        let is_new = unsafe { !(*c).events.contains_key(event) };
+        let token = unsafe { allocate_id(&mut (*c).next_event_handler_id, &(*c).handler_event_map) };
         if token < 0 { return -1; }
-        c.events.entry(event.to_string()).or_default().push(EventHandlerEntry {
+        unsafe { (*c).events.entry(event.to_string()).or_default() }.push(EventHandlerEntry {
                 id: token,
                 handler: Rc::new(handler),
         });
-        c.handler_event_map.insert(token, event.to_string());
+        unsafe { (*c).handler_event_map.insert(token, event.to_string()) };
         if is_new {
                 let mut nctx = NativeCtx::new(hash_string(b"REGISTER_RESOURCE_AS_EVENT_HANDLER"));
                 nctx.num_args = 1;
@@ -699,20 +699,20 @@ pub fn on(event: &str, handler: impl Fn(&str, &EventArgs) + 'static) -> i32 {
 }
 
 pub fn on_net(event: &str, handler: impl Fn(&str, &EventArgs) + 'static) -> i32 {
-        ctx().net_safe_events.insert(event.to_string());
+        unsafe { (*ctx()).net_safe_events.insert(event.to_string()) };
         on(event, handler)
 }
 
 pub fn register_net_event(event: &str) {
-        ctx().net_safe_events.insert(event.to_string());
+        unsafe { (*ctx()).net_safe_events.insert(event.to_string()) };
 }
 
 pub fn remove_event_handler(token: i32) {
         let c = ctx();
-        let event = match c.handler_event_map.remove(&token) { Some(e) => e, None => return };
-        if let Some(vec) = c.events.get_mut(&event) {
+        let event = match unsafe { (*c).handler_event_map.remove(&token) } { Some(e) => e, None => return };
+        if let Some(vec) = unsafe { (*c).events.get_mut(&event) } {
                 vec.retain(|e| e.id != token);
-                if vec.is_empty() { c.net_safe_events.remove(&event); }
+                if vec.is_empty() { unsafe { (*c).net_safe_events.remove(&event) }; }
         }
 }
 
@@ -740,38 +740,38 @@ pub fn was_event_canceled() -> bool {
 
 pub fn on_tick(handler: impl Fn() + 'static) -> i32 {
         let c = ctx();
-        let id = allocate_id(&mut c.next_tick_id, &c.ticks);
+        let id = unsafe { allocate_id(&mut (*c).next_tick_id, &(*c).ticks) };
         if id < 0 { return -1; }
-        c.ticks.insert(id, Rc::new(handler));
+        unsafe { (*c).ticks.insert(id, Rc::new(handler)) };
         id
 }
 
 pub fn remove_tick(id: i32) {
-        ctx().ticks.remove(&id);
+        unsafe { (*ctx()).ticks.remove(&id) };
 }
 
 pub fn on_stop(handler: impl Fn() + 'static) -> i32 {
         let c = ctx();
-        let id = allocate_id(&mut c.next_stop_id, &c.stops);
+        let id = unsafe { allocate_id(&mut (*c).next_stop_id, &(*c).stops) };
         if id < 0 { return -1; }
-        c.stops.insert(id, Rc::new(handler));
+        unsafe { (*c).stops.insert(id, Rc::new(handler)) };
         id
 }
 
 pub fn remove_stop(id: i32) {
-        ctx().stops.remove(&id);
+        unsafe { (*ctx()).stops.remove(&id) };
 }
 
 pub fn set_timeout(ms: u32, cb: impl Fn() + 'static) -> i32 {
-        ctx().add_timer(ms, 0, Rc::new(cb))
+        unsafe { (*ctx()).add_timer(ms, 0, Rc::new(cb)) }
 }
 
 pub fn set_interval(ms: u32, cb: impl Fn() + 'static) -> i32 {
-        ctx().add_timer(ms, ms, Rc::new(cb))
+        unsafe { (*ctx()).add_timer(ms, ms, Rc::new(cb)) }
 }
 
 pub fn clear_timer(id: i32) {
-        ctx().timers.remove(&id);
+        unsafe { (*ctx()).timers.remove(&id) };
 }
 
 pub fn get_resource_metadata(key: &str, index: i32) -> String {
@@ -902,22 +902,22 @@ pub fn add_export(name: &str, handler: impl Fn(&EventArgs) -> Value + 'static) {
 pub fn call_export(resource: &str, name: &str, args: &[Value]) -> Value {
         let cache_key = format!("{}/{}", resource, name);
         let c = ctx();
-        let mut export_ref = c.export_ref_cache.get(&cache_key).cloned().unwrap_or_default();
+        let mut export_ref = unsafe { (*c).export_ref_cache.get(&cache_key).cloned() }.unwrap_or_default();
         if export_ref.is_empty() {
                 export_ref = resolve_export_ref(resource, name);
                 if export_ref.is_empty() { return Value::Null; }
-                ctx().export_ref_cache.insert(cache_key.clone(), export_ref.clone());
+                unsafe { (*ctx()).export_ref_cache.insert(cache_key.clone(), export_ref.clone()) };
         }
         let user_payload = encode(&Value::Array(args.to_vec()));
         let ret_data = invoke_function_reference(&export_ref, &user_payload);
         if ret_data.is_empty() {
-                ctx().export_ref_cache.remove(&cache_key);
+                unsafe { (*ctx()).export_ref_cache.remove(&cache_key) };
                 export_ref = resolve_export_ref(resource, name);
                 if export_ref.is_empty() { return Value::Null; }
-                ctx().export_ref_cache.insert(cache_key.clone(), export_ref.clone());
+                unsafe { (*ctx()).export_ref_cache.insert(cache_key.clone(), export_ref.clone()) };
                 let ret_data = invoke_function_reference(&export_ref, &user_payload);
                 if ret_data.is_empty() {
-                        ctx().export_ref_cache.remove(&cache_key);
+                        unsafe { (*ctx()).export_ref_cache.remove(&cache_key) };
                         return Value::Null;
                 }
                 let result = decode(&ret_data);
@@ -985,7 +985,7 @@ fn resolve_export_ref(resource: &str, name: &str) -> String {
 pub fn on_command(command: &str, handler: impl Fn(&str, &[String]) + 'static) {
         let cmd = command.to_string();
         let c = ctx();
-        let handlers = c.commands.entry(cmd.clone()).or_default();
+        let handlers = unsafe { (*c).commands.entry(cmd.clone()).or_default() };
         handlers.push(Box::new(handler));
         if handlers.len() > 1 { return; }
         let cmd2 = cmd.clone();
@@ -999,7 +999,7 @@ pub fn on_command(command: &str, handler: impl Fn(&str, &[String]) + 'static) {
                         }
                 }
                 let c = ctx();
-                if let Some(handlers) = c.commands.get(&cmd2) {
+                if let Some(handlers) = unsafe { (*c).commands.get(&cmd2) } {
                         let snapshot: Vec<_> = handlers.iter().collect();
                         for h in snapshot { h(&source, &cmd_args); }
                 }
@@ -1036,14 +1036,14 @@ pub fn add_state_bag_change_handler(key_filter: &str, bag_filter: &str, handler:
                 NativeArg::ptr(cb_cs.as_ptr() as u64),
         ], 1, 0);
         let cookie = r.args[0] as i32;
-        ctx().state_bag_handler_refs.insert(cookie, host_ref);
+        unsafe { (*ctx()).state_bag_handler_refs.insert(cookie, host_ref) };
         cookie
 }
 
 pub fn remove_state_bag_change_handler(cookie: i32) {
         invoke_native_void(hash_string(b"REMOVE_STATE_BAG_CHANGE_HANDLER"), &[NativeArg::val(cookie as u32 as u64)]);
         let c = ctx();
-        if let Some(host_ref) = c.state_bag_handler_refs.remove(&cookie) {
+        if let Some(host_ref) = unsafe { (*c).state_bag_handler_refs.remove(&cookie) } {
                 remove_ref_idx(host_ref);
         }
 }
@@ -1229,17 +1229,17 @@ pub fn create_thread(f: impl Future<Output = ()> + 'static) {
 
 fn create_coroutine_impl(f: impl Future<Output = ()> + 'static, resume_now: bool) {
         let c = ctx();
-        if c.coroutines.len() >= 4096 {
-                trace_str(&format!("[script:{}] coroutine limit (4096) reached\n", c.resource_name));
+        if unsafe { (*c).coroutines.len() } >= 4096 {
+                trace_str(&format!("[script:{}] coroutine limit (4096) reached\n", unsafe { &(*c).resource_name }));
                 return;
         }
-        let id = allocate_id(&mut c.next_coroutine_id, &c.coroutines);
+        let id = unsafe { allocate_id(&mut (*c).next_coroutine_id, &(*c).coroutines) };
         if id < 0 {
-                trace_str(&format!("[script:{}] no free coroutine id\n", c.resource_name));
+                trace_str(&format!("[script:{}] no free coroutine id\n", unsafe { &(*c).resource_name }));
                 return;
         }
-        let now = c.now_ms();
-        c.coroutines.insert(id, CoroutineEntry { future: Box::pin(f), resume_at: now });
+        let now = unsafe { (*c).now_ms() };
+        unsafe { (*c).coroutines.insert(id, CoroutineEntry { future: Box::pin(f), resume_at: now }) };
         if resume_now {
                 resume_coroutine_by_id(id);
         } else {
@@ -1262,14 +1262,14 @@ pub fn perform_http_request(url: &str, method: &str, data: &str, headers: &[(&st
         let token = r.args[0] as i32;
         if token == -1 { return; }
         let c = ctx();
-        c.http_callbacks.insert(token, Box::new(callback));
-        if !c.http_response_registered {
-                c.http_response_registered = true;
+        unsafe { (*c).http_callbacks.insert(token, Box::new(callback)) };
+        if !unsafe { (*c).http_response_registered } {
+                unsafe { (*c).http_response_registered = true };
                 on("__cfx_internal:httpResponse", |_source, args| {
                         if args.len() < 4 { return; }
                         let tok = args.int(0);
                         let c = ctx();
-                        if let Some(cb) = c.http_callbacks.remove(&tok) {
+                        if let Some(cb) = unsafe { (*c).http_callbacks.remove(&tok) } {
                                 let status = args.int(1);
                                 let body = args.str(2).to_string();
                                 let headers = args.str(3).to_string();
@@ -1329,7 +1329,7 @@ pub mod runtime {
                                 let mut buf = vec![0u8; (len + 1) as usize];
                                 unsafe { __cfx_get_resource_metadata(key.as_ptr(), key.len() as u32, 0, buf.as_mut_ptr(), len + 1); }
                                 buf.truncate(len as usize);
-                                c.resource_name = String::from_utf8(buf).unwrap_or_default();
+                                unsafe { (*c).resource_name = String::from_utf8(buf).unwrap_or_default() };
                         }
                 }
                 on("onServerResourceStop", |_source, args| {
@@ -1337,7 +1337,7 @@ pub mod runtime {
                         let resource = args.str(0);
                         let prefix = format!("{}/", resource);
                         let c = ctx();
-                        c.export_ref_cache.retain(|k, _| !k.starts_with(&prefix));
+                        unsafe { (*c).export_ref_cache.retain(|k, _| !k.starts_with(&prefix)) };
                 });
                 main_fn();
         }
@@ -1345,9 +1345,9 @@ pub mod runtime {
         pub fn on_tick() {
                 {
                         let c = ctx();
-                        if !c.coroutines.is_empty() {
-                                let now = c.now_ms();
-                                let ready: Vec<i32> = c.coroutines.iter()
+                        if unsafe { !(*c).coroutines.is_empty() } {
+                                let now = unsafe { (*c).now_ms() };
+                                let ready: Vec<i32> = unsafe { (*c).coroutines.iter() }
                                         .filter(|(_, e)| now >= e.resume_at)
                                         .map(|(id, _)| *id)
                                         .collect();
@@ -1357,26 +1357,26 @@ pub mod runtime {
                         }
                 }
                 let c = ctx();
-                let now = c.now_ms();
-                let expired: Vec<i32> = c.timers.iter()
+                let now = unsafe { (*c).now_ms() };
+                let expired: Vec<i32> = unsafe { (*c).timers.iter() }
                         .filter(|(_, t)| now >= t.next_fire)
                         .map(|(id, _)| *id)
                         .collect();
                 for id in expired {
                         let c = ctx();
-                        if let Some(timer) = c.timers.get_mut(&id) {
+                        if let Some(timer) = unsafe { (*c).timers.get_mut(&id) } {
                                 if timer.interval_ms > 0 {
                                         let next = timer.next_fire + timer.interval_ms as u64;
                                         timer.next_fire = if next > now { next } else { now };
                                         let cb = Rc::clone(&timer.callback);
                                         cb();
                                 } else {
-                                        let timer = c.timers.remove(&id).unwrap();
+                                        let timer = unsafe { (*c).timers.remove(&id) }.unwrap();
                                         (timer.callback)();
                                 }
                         }
                 }
-                let tick_snapshot: Vec<Rc<dyn Fn()>> = ctx().ticks.values().map(Rc::clone).collect();
+                let tick_snapshot: Vec<Rc<dyn Fn()>> = unsafe { (*ctx()).ticks.values() }.map(Rc::clone).collect();
                 for h in tick_snapshot {
                         h();
                 }
@@ -1388,16 +1388,16 @@ pub mod runtime {
                 let args_data = unsafe { std::slice::from_raw_parts(args, args_len as usize) };
 
                 let c = ctx();
-                if !c.events.contains_key(key) { return; }
+                if unsafe { !(*c).events.contains_key(key) } { return; }
 
                 if src_str.len() >= 4 && &src_str[..4] == "net:" {
-                        if !c.net_safe_events.contains(key) { return; }
+                        if unsafe { !(*c).net_safe_events.contains(key) } { return; }
                 }
 
                 let decoded = ensure_array(decode(args_data));
                 let ea = EventArgs::new(decoded);
 
-                let handlers: Vec<EventHandlerFn> = c.events.get(key)
+                let handlers: Vec<EventHandlerFn> = unsafe { (*c).events.get(key) }
                         .map(|v| v.iter().map(|e| Rc::clone(&e.handler)).collect())
                         .unwrap_or_default();
 
@@ -1409,14 +1409,14 @@ pub mod runtime {
 
         pub fn on_stop() {
                 let c = ctx();
-                c.coroutines.clear();
-                c.export_ref_cache.clear();
-                let refs: Vec<(i32, i32)> = c.state_bag_handler_refs.drain().collect();
+                unsafe { (*c).coroutines.clear() };
+                unsafe { (*c).export_ref_cache.clear() };
+                let refs: Vec<(i32, i32)> = unsafe { (*c).state_bag_handler_refs.drain() }.collect();
                 for (cookie, host_ref) in refs {
                         invoke_native_void(hash_string(b"REMOVE_STATE_BAG_CHANGE_HANDLER"), &[NativeArg::val(cookie as u32 as u64)]);
                         remove_ref_idx(host_ref);
                 }
-                let snapshot: Vec<Rc<dyn Fn()>> = c.stops.values().map(Rc::clone).collect();
+                let snapshot: Vec<Rc<dyn Fn()>> = unsafe { (*c).stops.values() }.map(Rc::clone).collect();
                 for h in snapshot {
                         h();
                 }
@@ -1438,12 +1438,12 @@ pub mod runtime {
 
         pub fn has_pending_work() -> i32 {
                 let c = ctx();
-                if !c.ticks.is_empty() || !c.timers.is_empty() || !c.coroutines.is_empty() { 1 } else { 0 }
+                if unsafe { !(*c).ticks.is_empty() || !(*c).timers.is_empty() || !(*c).coroutines.is_empty() } { 1 } else { 0 }
         }
 
         pub fn invoke_ref(callback_id: i32, args_ptr: *const u8, args_len: u32, result_ptr: *mut u8, result_max: u32) -> i32 {
                 let c = ctx();
-                let cb = match c.ref_callbacks.get(&callback_id) { Some(cb) => cb as *const RefCallbackFn, None => return 0 };
+                let cb = match unsafe { (*c).ref_callbacks.get(&callback_id) } { Some(cb) => cb as *const RefCallbackFn, None => return 0 };
                 let args = unsafe { std::slice::from_raw_parts(args_ptr, args_len as usize) };
                 let result = unsafe { (*cb)(args) };
                 let copy = (result.len() as u32).min(result_max);
@@ -1455,7 +1455,7 @@ pub mod runtime {
 
         pub fn duplicate_ref(callback_id: i32) -> i32 {
                 let c = ctx();
-                if let Some(count) = c.ref_counts.get_mut(&callback_id) {
+                if let Some(count) = unsafe { (*c).ref_counts.get_mut(&callback_id) } {
                         *count += 1;
                 }
                 callback_id
@@ -1463,13 +1463,13 @@ pub mod runtime {
 
         pub fn remove_ref_callback(callback_id: i32) {
                 let c = ctx();
-                let remove = if let Some(count) = c.ref_counts.get_mut(&callback_id) {
+                let remove = if let Some(count) = unsafe { (*c).ref_counts.get_mut(&callback_id) } {
                         *count -= 1;
                         *count <= 0
                 } else { false };
                 if remove {
-                        c.ref_counts.remove(&callback_id);
-                        c.ref_callbacks.remove(&callback_id);
+                        unsafe { (*c).ref_counts.remove(&callback_id) };
+                        unsafe { (*c).ref_callbacks.remove(&callback_id) };
                 }
         }
 
