@@ -3384,6 +3384,7 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
                 std::string wasmFile;
                 bool ok = false;
                 std::atomic<bool> done{ false };
+                std::atomic<bool> cancelled{ false };
         };
 
     private:
