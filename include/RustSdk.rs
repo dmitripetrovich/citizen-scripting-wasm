@@ -474,7 +474,7 @@ struct Context {
         next_timer_id: i32,
         coroutines: HashMap<i32, CoroutineEntry>,
         next_coroutine_id: i32,
-        commands: HashMap<String, Vec<Box<dyn Fn(&str, &[String])>>>,
+        commands: HashMap<String, Vec<Rc<dyn Fn(&str, &[String])>>>,
         ref_callbacks: HashMap<i32, RefCallbackFn>,
         ref_counts: HashMap<i32, i32>,
         next_callback_id: i32,
@@ -992,7 +992,7 @@ pub fn on_command(command: &str, handler: impl Fn(&str, &[String]) + 'static) {
         let cmd = command.to_string();
         let c = ctx();
         let handlers = unsafe { (*c).commands.entry(cmd.clone()).or_default() };
-        handlers.push(Box::new(handler));
+        handlers.push(Rc::new(handler));
         if handlers.len() > 1 { return; }
         let cmd2 = cmd.clone();
         let (cb_ref, _) = create_canonical_ref(Box::new(move |args_data: &[u8]| -> Vec<u8> {
@@ -1005,10 +1005,10 @@ pub fn on_command(command: &str, handler: impl Fn(&str, &[String]) + 'static) {
                         }
                 }
                 let c = ctx();
-                if let Some(handlers) = unsafe { (*c).commands.get(&cmd2) } {
-                        let snapshot: Vec<_> = handlers.iter().collect();
-                        for h in snapshot { h(&source, &cmd_args); }
-                }
+                let snapshot: Vec<Rc<dyn Fn(&str, &[String])>> = unsafe { (*c).commands.get(&cmd2) }
+                        .map(|v| v.iter().map(Rc::clone).collect())
+                        .unwrap_or_default();
+                for h in snapshot { h(&source, &cmd_args); }
                 vec![0x90]
         }));
         if cb_ref.is_empty() { return; }
