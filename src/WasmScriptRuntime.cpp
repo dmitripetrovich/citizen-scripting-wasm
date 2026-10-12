@@ -2192,8 +2192,10 @@ static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, 
 static const std::string& getRustcHash()
 {
         static std::string s_hash;
-        if (s_hash.empty())
+        static bool s_tried = false;
+        if (!s_tried)
         {
+                s_tried = true;
                 auto result = fx::spawnProgram({ "rustc", "-vV" }, 65536, 10000);
                 std::string reason;
                 if (!processFailed(result, reason))
