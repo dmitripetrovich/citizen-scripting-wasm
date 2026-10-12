@@ -124,7 +124,7 @@ static bool ValidateScriptPath(const char* scriptFile, const std::string& root, 
         }
         resolvedRoot = resolvedRootBuf;
         free(resolvedRootBuf);
-        if (resolvedPath.compare(0, resolvedRoot.size(), resolvedRoot) != 0 || (resolvedPath.size() > resolvedRoot.size() && resolvedPath[resolvedRoot.size()] != '/'))
+        if (!resolvedPath.starts_with(resolvedRoot) || (resolvedPath.size() > resolvedRoot.size() && resolvedPath[resolvedRoot.size()] != '/'))
         {
                 LogError("Script path '%s' resolves outside resource root", scriptFile);
                 return false;
@@ -1972,8 +1972,9 @@ static bool extractSdk(const std::string& dir)
                         f = fopen(fullPath.c_str(), "wb");
                         if (!f) return false;
                 }
-                fwrite(p, 1, dataLen, f);
+                bool writeOk = fwrite(p, 1, dataLen, f) == dataLen;
                 fclose(f);
+                if (!writeOk) return false;
                 p += dataLen;
         }
         return true;
