@@ -902,19 +902,26 @@ pub fn add_export(name: &str, handler: impl Fn(&EventArgs) -> Value + 'static) {
 pub fn call_export(resource: &str, name: &str, args: &[Value]) -> Value {
         let cache_key = format!("{}/{}", resource, name);
         let c = ctx();
-        let mut export_ref = unsafe { (*c).export_ref_cache.get(&cache_key).cloned() }.unwrap_or_default();
-        if export_ref.is_empty() {
-                export_ref = resolve_export_ref(resource, name);
-                if export_ref.is_empty() { return Value::Null; }
-                unsafe { (*ctx()).export_ref_cache.insert(cache_key.clone(), export_ref.clone()) };
-        }
+        let cached = unsafe { (*c).export_ref_cache.get(&cache_key).cloned() }.unwrap_or_default();
+        let mut export_ref = if cached.is_empty() {
+                let resolved = resolve_export_ref(resource, name);
+                if resolved.is_empty() { return Value::Null; }
+                unsafe { (*ctx()).export_ref_cache.insert(cache_key.clone(), resolved.clone()) };
+                resolved
+        } else {
+                cached.clone()
+        };
         let user_payload = encode(&Value::Array(args.to_vec()));
         let ret_data = invoke_function_reference(&export_ref, &user_payload);
         if ret_data.is_empty() {
                 unsafe { (*ctx()).export_ref_cache.remove(&cache_key) };
-                export_ref = resolve_export_ref(resource, name);
-                if export_ref.is_empty() { return Value::Null; }
-                unsafe { (*ctx()).export_ref_cache.insert(cache_key.clone(), export_ref.clone()) };
+                let resolved = resolve_export_ref(resource, name);
+                if resolved.is_empty() { return Value::Null; }
+                unsafe { (*ctx()).export_ref_cache.insert(cache_key.clone(), resolved.clone()) };
+                if resolved != export_ref {
+                        return Value::Null;
+                }
+                export_ref = resolved;
                 let ret_data = invoke_function_reference(&export_ref, &user_payload);
                 if ret_data.is_empty() {
                         unsafe { (*ctx()).export_ref_cache.remove(&cache_key) };
