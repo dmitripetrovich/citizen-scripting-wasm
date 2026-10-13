@@ -1,6 +1,7 @@
 #include "CppSdk.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <exception>
@@ -35,18 +36,13 @@ static constexpr int WORKER_SHUTDOWN_INTERVAL_MS = 100;
 static constexpr size_t MAX_BOOKMARKS_PER_RESOURCE = 1024;
 static constexpr size_t MIN_NATIVE_PTR_BOUNDS = 4096;
 
-static std::string GetResourcePath(IScriptHost* host)
+static std::string GetResourcePath(IScriptHost* host, const std::string& name)
 {
-        fx::OMPtr<IScriptHostWithResourceData> md;
-        fx::OMPtr<IScriptHost> h(host);
-        if (FX_FAILED(h.As(&md)) || !md.GetRef())
-                return { };
-        char* name = nullptr;
-        if (FX_FAILED(md->GetResourceName(&name)) || !name)
+        if (name.empty())
                 return { };
         fxNativeContext ctx{ };
         ctx.nativeIdentifier = HashString("GET_RESOURCE_PATH");
-        ctx.arguments[0] = reinterpret_cast<uintptr_t>(name);
+        ctx.arguments[0] = reinterpret_cast<uintptr_t>(name.c_str());
         ctx.numArguments = 1;
         ctx.numResults = 1;
         host->InvokeNative(ctx);
@@ -303,7 +299,7 @@ static void SanitizeTraceMsg(std::string& msg)
 
 static wasm_trap_t* CbTrace(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t*, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
+        auto* rt = static_cast<WasmModule*>(env)->rt;
         WasmMem mem;
         if (!mem.init(caller))
                 return nullptr;
@@ -326,8 +322,9 @@ static wasm_trap_t* CbTrace(void* env, wasmtime_caller_t* caller, const wasmtime
 
 static wasm_trap_t* CbInvokeNative(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t*, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
-        rt->m_hasValidNativeResult = false;
+        auto* mod = static_cast<WasmModule*>(env);
+        auto* rt = mod->rt;
+        mod->hasValidNativeResult = false;
         WasmMem mem;
         if (!mem.init(caller))
                 return nullptr;
@@ -363,10 +360,10 @@ static wasm_trap_t* CbInvokeNative(void* env, wasmtime_caller_t* caller, const w
         }
         if (rt->host())
                 rt->host()->InvokeNative(hostCtx);
-        rt->m_lastNativeCtx = hostCtx;
+        mod->lastNativeCtx = hostCtx;
         uint32_t validResultMask = (wctx.numResults >= 32) ? 0xFFFFFFFFu : ((1u << wctx.numResults) - 1);
-        rt->m_lastResultPtrMask = wctx.resultPtrMask & validResultMask;
-        rt->m_hasValidNativeResult = true;
+        mod->lastResultPtrMask = wctx.resultPtrMask & validResultMask;
+        mod->hasValidNativeResult = true;
         for (int i = 0; i < hostCtx.numResults; ++i)
         {
                 if ((wctx.resultPtrMask >> i) & 1u)
@@ -384,8 +381,8 @@ static wasm_trap_t* CbInvokeNative(void* env, wasmtime_caller_t* caller, const w
 
 static wasm_trap_t* CbCopyStringResult(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t* results, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
-        if (!rt->m_hasValidNativeResult)
+        auto* mod = static_cast<WasmModule*>(env);
+        if (!mod->hasValidNativeResult)
         {
                 results[0] = I32Val(0);
                 return nullptr;
@@ -399,12 +396,12 @@ static wasm_trap_t* CbCopyStringResult(void* env, wasmtime_caller_t* caller, con
         int32_t resultIdx = args[1].of.i32;
         uint32_t bufPtr = ArgU32(args[2]);
         int32_t bufMax = args[3].of.i32;
-        if (resultIdx < 0 || resultIdx >= 32 || !((rt->m_lastResultPtrMask >> resultIdx) & 1u))
+        if (resultIdx < 0 || resultIdx >= 32 || !((mod->lastResultPtrMask >> resultIdx) & 1u))
         {
                 results[0] = I32Val(0);
                 return nullptr;
         }
-        const char* str = reinterpret_cast<const char*>(rt->m_lastNativeCtx.arguments[resultIdx]);
+        const char* str = reinterpret_cast<const char*>(mod->lastNativeCtx.arguments[resultIdx]);
         if (!str)
         {
                 results[0] = I32Val(0);
@@ -418,8 +415,8 @@ static wasm_trap_t* CbCopyStringResult(void* env, wasmtime_caller_t* caller, con
 
 static wasm_trap_t* CbCopyBinaryResult(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t* results, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
-        if (!rt->m_hasValidNativeResult)
+        auto* mod = static_cast<WasmModule*>(env);
+        if (!mod->hasValidNativeResult)
         {
                 results[0] = I32Val(0);
                 return nullptr;
@@ -434,19 +431,19 @@ static wasm_trap_t* CbCopyBinaryResult(void* env, wasmtime_caller_t* caller, con
         int32_t sizeIdx = args[2].of.i32;
         uint32_t bufPtr = ArgU32(args[3]);
         int32_t bufMax = args[4].of.i32;
-        if (ptrIdx < 0 || ptrIdx >= 32 || sizeIdx < 0 || sizeIdx >= 32 || !((rt->m_lastResultPtrMask >> ptrIdx) & 1u) || ((rt->m_lastResultPtrMask >> sizeIdx) & 1u))
+        if (ptrIdx < 0 || ptrIdx >= 32 || sizeIdx < 0 || sizeIdx >= 32 || !((mod->lastResultPtrMask >> ptrIdx) & 1u) || ((mod->lastResultPtrMask >> sizeIdx) & 1u))
         {
                 results[0] = I32Val(0);
                 return nullptr;
         }
-        const void* data = reinterpret_cast<const void*>(rt->m_lastNativeCtx.arguments[ptrIdx]);
+        const void* data = reinterpret_cast<const void*>(mod->lastNativeCtx.arguments[ptrIdx]);
         if (!data)
         {
                 results[0] = I32Val(0);
                 return nullptr;
         }
         static constexpr size_t MAX_BINARY_RESULT = 1u << 24;
-        size_t dataSize = static_cast<size_t>(rt->m_lastNativeCtx.arguments[sizeIdx]);
+        size_t dataSize = static_cast<size_t>(mod->lastNativeCtx.arguments[sizeIdx]);
         if (dataSize > MAX_BINARY_RESULT)
                 dataSize = MAX_BINARY_RESULT;
         size_t copy = (bufMax > 0) ? std::min<size_t>(dataSize, static_cast<size_t>(bufMax)) : 0;
@@ -458,7 +455,7 @@ static wasm_trap_t* CbCopyBinaryResult(void* env, wasmtime_caller_t* caller, con
 
 static wasm_trap_t* CbEmitEvent(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t*, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
+        auto* rt = static_cast<WasmModule*>(env)->rt;
         WasmMem mem;
         if (!mem.init(caller))
                 return nullptr;
@@ -484,7 +481,7 @@ static wasm_trap_t* CbEmitEvent(void* env, wasmtime_caller_t* caller, const wasm
 
 static wasm_trap_t* CbEmitNetEvent(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t*, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
+        auto* rt = static_cast<WasmModule*>(env)->rt;
         WasmMem mem;
         if (!mem.init(caller))
                 return nullptr;
@@ -512,7 +509,7 @@ static wasm_trap_t* CbEmitNetEvent(void* env, wasmtime_caller_t* caller, const w
 
 static wasm_trap_t* CbCancelEvent(void* env, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
+        auto* rt = static_cast<WasmModule*>(env)->rt;
         rt->m_eventCanceled = true;
         if (rt->host())
         {
@@ -527,13 +524,13 @@ static wasm_trap_t* CbCancelEvent(void* env, wasmtime_caller_t*, const wasmtime_
 
 static wasm_trap_t* CbWasEventCanceled(void* env, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t* results, size_t)
 {
-        results[0] = I32Val(static_cast<WasmScriptRuntime*>(env)->m_eventCanceled ? 1 : 0);
+        results[0] = I32Val(static_cast<WasmModule*>(env)->rt->m_eventCanceled ? 1 : 0);
         return nullptr;
 }
 
 static wasm_trap_t* CbGetResourceMetadata(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t* results, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
+        auto* rt = static_cast<WasmModule*>(env)->rt;
         WasmMem mem;
         if (!mem.init(caller))
         {
@@ -564,7 +561,7 @@ static wasm_trap_t* CbGetResourceMetadata(void* env, wasmtime_caller_t* caller, 
 
 static wasm_trap_t* CbGetNumResourceMetadata(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t* results, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
+        auto* rt = static_cast<WasmModule*>(env)->rt;
         WasmMem mem;
         if (!mem.init(caller))
         {
@@ -588,7 +585,7 @@ static wasm_trap_t* CbGetNumResourceMetadata(void* env, wasmtime_caller_t* calle
 
 static wasm_trap_t* CbIsManifestVersionV2Between(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t* results, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
+        auto* rt = static_cast<WasmModule*>(env)->rt;
         WasmMem mem;
         if (!mem.init(caller))
         {
@@ -614,10 +611,12 @@ static wasm_trap_t* CbIsManifestVersionV2Between(void* env, wasmtime_caller_t* c
 
 static wasm_trap_t* CbCreateRef(void* env, wasmtime_caller_t*, const wasmtime_val_t* args, size_t, wasmtime_val_t* results, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
+        auto* mod = static_cast<WasmModule*>(env);
+        auto* rt = mod->rt;
         uint32_t callbackId = ArgU32(args[0]);
         std::weak_ptr<WasmScriptRuntime::RefGuard> guardWeak = rt->m_refGuard;
-        int32_t refIdx = rt->AddFuncRef([callbackId, guardWeak](const char* argsSerialized, uint32_t argsSize) -> std::vector<char>
+        std::weak_ptr<WasmModule> modWeak = mod->weak_from_this();
+        int32_t refIdx = rt->AddFuncRef([callbackId, guardWeak, modWeak](const char* argsSerialized, uint32_t argsSize) -> std::vector<char>
         {
                 auto guard = guardWeak.lock();
                 if (!guard)
@@ -625,19 +624,23 @@ static wasm_trap_t* CbCreateRef(void* env, wasmtime_caller_t*, const wasmtime_va
                 std::lock_guard<std::recursive_mutex> lk(guard->mu);
                 if (!guard->alive)
                         throw std::runtime_error("Runtime destroyed, ref callback invalid");
+                auto target = modWeak.lock();
+                if (!target || !target->store)
+                        throw std::runtime_error("Script unloaded, ref callback invalid");
                 std::vector<char> result;
-                if (!guard->rt->callInvokeRef(callbackId, argsSerialized, argsSize, result))
+                if (!guard->rt->callInvokeRef(*target, callbackId, argsSerialized, argsSize, result))
                         throw std::runtime_error("WASM trap in ref callback");
                 return result;
         });
-        rt->wasmMapRef(refIdx, callbackId);
+        if (refIdx >= 0)
+                rt->wasmMapRef(refIdx, mod, callbackId);
         results[0] = I32Val(refIdx);
         return nullptr;
 }
 
 static wasm_trap_t* CbCanonicalizeRef(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t* results, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
+        auto* rt = static_cast<WasmModule*>(env)->rt;
         WasmMem mem;
         if (!mem.init(caller))
         {
@@ -668,7 +671,7 @@ static wasm_trap_t* CbCanonicalizeRef(void* env, wasmtime_caller_t* caller, cons
 
 static wasm_trap_t* CbRemoveRef(void* env, wasmtime_caller_t*, const wasmtime_val_t* args, size_t, wasmtime_val_t*, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
+        auto* rt = static_cast<WasmModule*>(env)->rt;
         int32_t refIdx = args[0].of.i32;
         rt->RemoveRef(refIdx);
         return nullptr;
@@ -676,7 +679,8 @@ static wasm_trap_t* CbRemoveRef(void* env, wasmtime_caller_t*, const wasmtime_va
 
 static wasm_trap_t* CbInvokeFunctionReference(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t*, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
+        auto* mod = static_cast<WasmModule*>(env);
+        auto* rt = mod->rt;
         WasmMem mem;
         if (!mem.init(caller))
                 return nullptr;
@@ -695,21 +699,21 @@ static wasm_trap_t* CbInvokeFunctionReference(void* env, wasmtime_caller_t* call
         if (retBuf.GetRef() && retBuf->GetLength() > 0)
         {
                 dataLen = static_cast<uint32_t>(retBuf->GetLength());
-                dataPtr = rt->wasmAlloc(dataLen);
+                dataPtr = mod->wasmAlloc(dataLen);
                 if (!dataPtr)
                         dataLen = 0;
         }
         if (!mem.init(caller))
         {
                 if (dataPtr)
-                        rt->wasmFree(dataPtr, dataLen);
+                        mod->wasmFree(dataPtr, dataLen);
                 return nullptr;
         }
         if (dataPtr && dataLen && mem.check(dataPtr, dataLen))
                 memcpy(mem.base + dataPtr, retBuf->GetBytes(), dataLen);
         else if (dataPtr)
         {
-                rt->wasmFree(dataPtr, dataLen);
+                mod->wasmFree(dataPtr, dataLen);
                 if (!mem.init(caller))
                         return nullptr;
                 dataPtr = 0;
@@ -722,14 +726,14 @@ static wasm_trap_t* CbInvokeFunctionReference(void* env, wasmtime_caller_t* call
         }
         else if (dataPtr)
         {
-                rt->wasmFree(dataPtr, dataLen);
+                mod->wasmFree(dataPtr, dataLen);
         }
         return nullptr;
 }
 
 static wasm_trap_t* CbGetInstanceId(void* env, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t* results, size_t)
 {
-        results[0] = I32Val(static_cast<WasmScriptRuntime*>(env)->GetInstanceId());
+        results[0] = I32Val(static_cast<WasmModule*>(env)->rt->GetInstanceId());
         return nullptr;
 }
 
@@ -779,7 +783,8 @@ static bool HasWasmPermission(IScriptHost* host, const char* convarName, const s
 
 static wasm_trap_t* CbSpawnProcess(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t* results, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
+        auto* mod = static_cast<WasmModule*>(env);
+        auto* rt = mod->rt;
         WasmMem mem;
         if (!mem.init(caller))
         {
@@ -804,7 +809,7 @@ static wasm_trap_t* CbSpawnProcess(void* env, wasmtime_caller_t* caller, const w
         std::string displayCmd = UTF8Truncate(cmd, 256);
         LogWarning("Resource '%s' spawning child process: %s", rt->resourceName().c_str(), displayCmd.c_str());
         fx::ProcessResult pr = fx::spawnProcess(cmd);
-        rt->m_lastSpawnExitCode = pr.exitCode;
+        mod->lastSpawnExitCode = pr.exitCode;
         if (pr.status == -2 || pr.status == -3)
         {
                 results[0] = I32Val(pr.status);
@@ -816,7 +821,7 @@ static wasm_trap_t* CbSpawnProcess(void* env, wasmtime_caller_t* caller, const w
 
 static wasm_trap_t* CbGetLastSpawnExitCode(void* env, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t* results, size_t)
 {
-        results[0] = I32Val(static_cast<WasmScriptRuntime*>(env)->m_lastSpawnExitCode);
+        results[0] = I32Val(static_cast<WasmModule*>(env)->lastSpawnExitCode);
         return nullptr;
 }
 
@@ -1021,7 +1026,8 @@ static void RunWorker(std::shared_ptr<WasmScriptRuntime::WorkerState> state, was
 
 static wasm_trap_t* CbCreateWorker(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t* results, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
+        auto* mod = static_cast<WasmModule*>(env);
+        auto* rt = mod->rt;
         WasmMem mem;
         if (!mem.init(caller))
         {
@@ -1057,14 +1063,15 @@ static wasm_trap_t* CbCreateWorker(void* env, wasmtime_caller_t* caller, const w
         }
         auto state = std::make_shared<WasmScriptRuntime::WorkerState>();
         state->resourceName = rt->resourceName();
-        wasmtime_module_t* mod = wasmtime_module_clone(rt->wasmModule());
+        state->owner = mod;
+        wasmtime_module_t* workerModule = wasmtime_module_clone(mod->module);
         try
         {
-                state->thread = std::thread(RunWorker, state, mod, std::move(fnName), std::move(inputData));
+                state->thread = std::thread(RunWorker, state, workerModule, std::move(fnName), std::move(inputData));
         }
         catch (...)
         {
-                wasmtime_module_delete(mod);
+                wasmtime_module_delete(workerModule);
                 results[0] = I32Val(-3);
                 return nullptr;
         }
@@ -1075,10 +1082,11 @@ static wasm_trap_t* CbCreateWorker(void* env, wasmtime_caller_t* caller, const w
 
 static wasm_trap_t* CbPollWorker(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t* results, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
+        auto* mod = static_cast<WasmModule*>(env);
+        auto* rt = mod->rt;
         int32_t workerId = args[0].of.i32;
         auto it = rt->m_workers.find(workerId);
-        if (it == rt->m_workers.end())
+        if (it == rt->m_workers.end() || it->second->owner != mod)
         {
                 results[0] = I32Val(-2);
                 return nullptr;
@@ -1136,8 +1144,8 @@ static wasm_trap_t* CbPollWorker(void* env, wasmtime_caller_t* caller, const was
 
 static wasm_trap_t* CbScheduleBookmark(void* env, wasmtime_caller_t*, const wasmtime_val_t* args, size_t, wasmtime_val_t*, size_t)
 {
-        auto* rt = static_cast<WasmScriptRuntime*>(env);
-        rt->scheduleWasmBookmark(args[0].of.i32, args[1].of.i32);
+        auto* mod = static_cast<WasmModule*>(env);
+        mod->rt->scheduleWasmBookmark(*mod, args[0].of.i32, args[1].of.i32);
         return nullptr;
 }
 
@@ -1179,6 +1187,12 @@ result_t OM_DECL WasmScriptRuntime::Create(IScriptHost* host)
         fx::OMPtr<IScriptHostWithManifest> mh;
         if (FX_SUCCEEDED(m_host.As(&mh)) && mh.GetRef())
                 m_manifestHost = mh;
+        fx::OMPtr<IScriptHostWithBookmarks> bh;
+        if (FX_SUCCEEDED(m_host.As(&bh)) && bh.GetRef())
+        {
+                m_bookmarkHost = bh;
+                m_bookmarkHost->CreateBookmarks(static_cast<IScriptTickRuntimeWithBookmarks*>(this));
+        }
         return FX_S_OK;
 }
 
@@ -1202,17 +1216,25 @@ result_t OM_DECL WasmScriptRuntime::Destroy()
                 }
                 m_bookmarkHost = { };
         }
-        if (m_hasStopFn)
         {
+                auto modules = m_modules;
                 fx::PushEnvironment env(static_cast<IScriptRuntime*>(this));
-                BoundaryGuard boundary(m_host.GetRef(), static_cast<int64_t>(nextBoundaryId()));
-                refuelWasm();
-                callVoid(m_fnStop);
+                for (auto& mod : modules)
+                {
+                        if (!mod->hasStopFn || !mod->store)
+                                continue;
+                        BoundaryGuard boundary(m_host.GetRef(), static_cast<int64_t>(nextBoundaryId()));
+                        mod->refuelWasm();
+                        mod->callVoid(mod->fnStop);
+                }
         }
-        m_compileJob = nullptr;
+        m_pendingLoads.clear();
         m_refs.clear();
         m_refToCallbackId.clear();
-        destroyWasm();
+        destroyWorkers();
+        for (auto& mod : m_modules)
+                destroyModule(*mod);
+        m_modules.clear();
         m_host = { };
         m_metadataHost = { };
         m_manifestHost = { };
@@ -1257,81 +1279,66 @@ wasm_engine_t* WasmScriptRuntime::engine()
         return g_engine;
 }
 
-void WasmScriptRuntime::refuelWasm()
+void WasmModule::refuelWasm()
 {
-        if (!m_store)
+        if (!store)
                 return;
-        wasmtime_context_set_fuel(wasmtime_store_context(m_store), WASM_FUEL_AMOUNT);
+        wasmtime_context_set_fuel(wasmtime_store_context(store), WASM_FUEL_AMOUNT);
 }
 
-void WasmScriptRuntime::scheduleWasmBookmark(int32_t wasmId, int32_t deadlineMs)
+uint8_t* WasmModule::wasmBase()
 {
-        if (!m_bookmarkHost.GetRef())
-                return;
-        auto it = m_wasmToHostBookmark.find(wasmId);
-        uint64_t hostId;
-        if (it != m_wasmToHostBookmark.end())
-        {
-                hostId = it->second;
-        }
-        else
-        {
-                if (m_wasmToHostBookmark.size() >= MAX_BOOKMARKS_PER_RESOURCE)
-                        return;
-                hostId = m_nextWasmHostBookmarkId++;
-                m_wasmToHostBookmark[wasmId] = hostId;
-                m_hostToWasmBookmark[hostId] = wasmId;
-        }
-        if (deadlineMs < 0)
-                deadlineMs = 0;
-        int64_t deadline = (deadlineMs == 0) ? 0 : -static_cast<int64_t>(deadlineMs);
-        m_bookmarkHost->ScheduleBookmark(static_cast<IScriptTickRuntimeWithBookmarks*>(this), hostId, deadline);
-}
-
-uint8_t* WasmScriptRuntime::wasmBase()
-{
-        if (!m_hasMemory || !m_store)
+        if (!hasMemory || !store)
                 return nullptr;
-        return wasmtime_memory_data(wasmtime_store_context(m_store), &m_memory);
+        return wasmtime_memory_data(wasmtime_store_context(store), &memory);
 }
 
-size_t WasmScriptRuntime::wasmMemSize()
+size_t WasmModule::wasmMemSize()
 {
-        if (!m_hasMemory || !m_store)
+        if (!hasMemory || !store)
                 return 0;
-        return wasmtime_memory_data_size(wasmtime_store_context(m_store), &m_memory);
+        return wasmtime_memory_data_size(wasmtime_store_context(store), &memory);
 }
 
-uint32_t WasmScriptRuntime::wasmAlloc(uint32_t size)
+bool WasmModule::call(const wasmtime_func_t& fn, const wasmtime_val_t* args, size_t nargs, wasmtime_val_t* results, size_t nresults, const char* label)
 {
-        if (!m_hasAllocFn || !m_store)
+        if (!store)
+                return false;
+        WasmModule* prev = rt->m_activeModule;
+        rt->m_activeModule = this;
+        bool ok = WasmCall(store, fn, args, nargs, results, nresults, rt->resourceName().c_str(), label);
+        rt->m_activeModule = prev;
+        return ok;
+}
+
+uint32_t WasmModule::wasmAlloc(uint32_t size)
+{
+        if (!hasAllocFn || !store)
                 return 0;
         wasmtime_val_t arg = I32Val(static_cast<int32_t>(size));
         wasmtime_val_t result{ };
-        if (!WasmCall(m_store, m_fnAlloc, &arg, 1, &result, 1, m_resourceName.c_str(), "alloc trap"))
+        if (!call(fnAlloc, &arg, 1, &result, 1, "alloc trap"))
                 return 0;
         return static_cast<uint32_t>(result.of.i32);
 }
 
-void WasmScriptRuntime::wasmFree(uint32_t ptr, uint32_t size)
+void WasmModule::wasmFree(uint32_t ptr, uint32_t size)
 {
-        if (!m_hasFreeFn || !m_store)
+        if (!hasFreeFn || !store)
                 return;
         wasmtime_val_t args[2] = { I32Val(static_cast<int32_t>(ptr)), I32Val(static_cast<int32_t>(size)) };
-        if (!WasmCall(m_store, m_fnFree, args, 2, nullptr, 0, m_resourceName.c_str(), "free trap"))
-                LogWarning("wasmFree trapped in '%s' (ptr=%u, size=%u)", m_resourceName.c_str(), ptr, size);
+        if (!call(fnFree, args, 2, nullptr, 0, "free trap"))
+                LogWarning("wasmFree trapped in '%s' (ptr=%u, size=%u)", rt->resourceName().c_str(), ptr, size);
 }
 
-bool WasmScriptRuntime::callVoid(const wasmtime_func_t& fn)
+bool WasmModule::callVoid(const wasmtime_func_t& fn)
 {
-        if (!m_store)
-                return false;
-        return WasmCall(m_store, fn, nullptr, 0, nullptr, 0, m_resourceName.c_str(), "trap");
+        return call(fn, nullptr, 0, nullptr, 0, "trap");
 }
 
-bool WasmScriptRuntime::callEvent(uint32_t namePtr, uint32_t nameLen, uint32_t argsPtr, uint32_t argsLen, uint32_t srcPtr, uint32_t srcLen)
+bool WasmModule::callEvent(uint32_t namePtr, uint32_t nameLen, uint32_t argsPtr, uint32_t argsLen, uint32_t srcPtr, uint32_t srcLen)
 {
-        if (!m_hasEventFn || !m_store)
+        if (!hasEventFn || !store)
                 return false;
         wasmtime_val_t a[6] = {
                 I32Val(static_cast<int32_t>(namePtr)),
@@ -1341,33 +1348,74 @@ bool WasmScriptRuntime::callEvent(uint32_t namePtr, uint32_t nameLen, uint32_t a
                 I32Val(static_cast<int32_t>(srcPtr)),
                 I32Val(static_cast<int32_t>(srcLen)),
         };
-        return WasmCall(m_store, m_fnEvent, a, 6, nullptr, 0, m_resourceName.c_str(), "event trap");
+        return call(fnEvent, a, 6, nullptr, 0, "event trap");
 }
 
-bool WasmScriptRuntime::callInvokeRef(uint32_t callbackId, const char* argsSerialized, uint32_t argsSize, std::vector<char>& result)
+void WasmModule::duplicateRef(int32_t callbackId)
 {
-        if (!m_hasInvokeRefFn || !m_store || !m_hasAllocFn)
+        if (!hasDuplicateRefFn || !store)
+                return;
+        wasmtime_val_t a[1] = { I32Val(callbackId) };
+        wasmtime_val_t ret{ };
+        call(fnDuplicateRef, a, 1, &ret, 1, "duplicate_ref trap");
+}
+
+void WasmModule::removeRef(int32_t callbackId)
+{
+        if (!hasRemoveRefFn || !store)
+                return;
+        wasmtime_val_t a[1] = { I32Val(callbackId) };
+        call(fnRemoveRef, a, 1, nullptr, 0, "remove_ref trap");
+}
+
+void WasmScriptRuntime::scheduleWasmBookmark(WasmModule& mod, int32_t wasmId, int32_t deadlineMs)
+{
+        if (!m_bookmarkHost.GetRef())
+                return;
+        auto it = mod.wasmToHostBookmark.find(wasmId);
+        uint64_t hostId;
+        if (it != mod.wasmToHostBookmark.end())
+        {
+                hostId = it->second;
+        }
+        else
+        {
+                if (m_hostToWasmBookmark.size() >= MAX_BOOKMARKS_PER_RESOURCE)
+                        return;
+                hostId = m_nextWasmHostBookmarkId++;
+                mod.wasmToHostBookmark[wasmId] = hostId;
+                m_hostToWasmBookmark[hostId] = { &mod, wasmId };
+        }
+        if (deadlineMs < 0)
+                deadlineMs = 0;
+        int64_t deadline = (deadlineMs == 0) ? 0 : -static_cast<int64_t>(deadlineMs);
+        m_bookmarkHost->ScheduleBookmark(static_cast<IScriptTickRuntimeWithBookmarks*>(this), hostId, deadline);
+}
+
+bool WasmScriptRuntime::callInvokeRef(WasmModule& mod, uint32_t callbackId, const char* argsSerialized, uint32_t argsSize, std::vector<char>& result)
+{
+        if (!mod.hasInvokeRefFn || !mod.store || !mod.hasAllocFn)
                 return false;
-        refuelWasm();
+        mod.refuelWasm();
         uint32_t argsAllocSz = argsSize > 0 ? argsSize : 1;
-        uint32_t argsPtr = wasmAlloc(argsAllocSz);
+        uint32_t argsPtr = mod.wasmAlloc(argsAllocSz);
         if (!argsPtr)
                 return false;
-        uint8_t* base = wasmBase();
-        size_t memSz = wasmMemSize();
+        uint8_t* base = mod.wasmBase();
+        size_t memSz = mod.wasmMemSize();
         if (!InBounds(memSz, argsPtr, argsSize))
         {
-                wasmFree(argsPtr, argsAllocSz);
+                mod.wasmFree(argsPtr, argsAllocSz);
                 return false;
         }
         if (argsSize > 0)
                 memcpy(base + argsPtr, argsSerialized, argsSize);
         static constexpr uint32_t MAX_REF_RESULT_SIZE = 16u * 1024u * 1024u;
         uint32_t resultBufMax = RESULT_BUF_SIZE;
-        uint32_t resultPtr = wasmAlloc(resultBufMax);
+        uint32_t resultPtr = mod.wasmAlloc(resultBufMax);
         if (!resultPtr)
         {
-                wasmFree(argsPtr, argsAllocSz);
+                mod.wasmFree(argsPtr, argsAllocSz);
                 return false;
         }
         wasmtime_val_t a[5] = {
@@ -1378,21 +1426,21 @@ bool WasmScriptRuntime::callInvokeRef(uint32_t callbackId, const char* argsSeria
                 I32Val(static_cast<int32_t>(resultBufMax)),
         };
         wasmtime_val_t ret{ };
-        if (!WasmCall(m_store, m_fnInvokeRef, a, 5, &ret, 1, m_resourceName.c_str(), "invoke_ref trap"))
+        if (!mod.call(mod.fnInvokeRef, a, 5, &ret, 1, "invoke_ref trap"))
         {
-                wasmFree(resultPtr, resultBufMax);
-                wasmFree(argsPtr, argsAllocSz);
+                mod.wasmFree(resultPtr, resultBufMax);
+                mod.wasmFree(argsPtr, argsAllocSz);
                 return false;
         }
         int32_t actualLen = ret.of.i32;
         if (actualLen > 0 && static_cast<uint32_t>(actualLen) > resultBufMax && static_cast<uint32_t>(actualLen) <= MAX_REF_RESULT_SIZE)
         {
-                wasmFree(resultPtr, resultBufMax);
+                mod.wasmFree(resultPtr, resultBufMax);
                 uint32_t newBufMax = static_cast<uint32_t>(actualLen);
-                uint32_t newResultPtr = wasmAlloc(newBufMax);
+                uint32_t newResultPtr = mod.wasmAlloc(newBufMax);
                 if (!newResultPtr)
                 {
-                        wasmFree(argsPtr, argsAllocSz);
+                        mod.wasmFree(argsPtr, argsAllocSz);
                         return false;
                 }
                 resultPtr = newResultPtr;
@@ -1400,78 +1448,61 @@ bool WasmScriptRuntime::callInvokeRef(uint32_t callbackId, const char* argsSeria
                 a[3] = I32Val(static_cast<int32_t>(resultPtr));
                 a[4] = I32Val(static_cast<int32_t>(resultBufMax));
                 wasmtime_val_t ret2{ };
-                if (!WasmCall(m_store, m_fnInvokeRef, a, 5, &ret2, 1, m_resourceName.c_str(), "invoke_ref trap"))
+                if (!mod.call(mod.fnInvokeRef, a, 5, &ret2, 1, "invoke_ref trap"))
                 {
-                        wasmFree(resultPtr, resultBufMax);
-                        wasmFree(argsPtr, argsAllocSz);
+                        mod.wasmFree(resultPtr, resultBufMax);
+                        mod.wasmFree(argsPtr, argsAllocSz);
                         return false;
                 }
                 actualLen = ret2.of.i32;
         }
-        wasmFree(argsPtr, argsAllocSz);
+        mod.wasmFree(argsPtr, argsAllocSz);
         if (actualLen > 0)
         {
                 uint32_t copyLen = std::min(static_cast<uint32_t>(actualLen), resultBufMax);
                 if (static_cast<uint32_t>(actualLen) > resultBufMax)
                         LogWarning("ref result truncated in '%s' (%d > %u, cap %u)", m_resourceName.c_str(), actualLen, resultBufMax, MAX_REF_RESULT_SIZE);
-                base = wasmBase();
-                memSz = wasmMemSize();
+                base = mod.wasmBase();
+                memSz = mod.wasmMemSize();
                 if (InBounds(memSz, resultPtr, copyLen))
                 {
                         result.resize(copyLen);
                         memcpy(result.data(), base + resultPtr, copyLen);
                 }
-                wasmFree(resultPtr, resultBufMax);
+                mod.wasmFree(resultPtr, resultBufMax);
         }
         else
         {
-                wasmFree(resultPtr, resultBufMax);
+                mod.wasmFree(resultPtr, resultBufMax);
                 result = std::vector<char>{ static_cast<char>(MSGPACK_EMPTY_ARRAY) };
         }
         return true;
 }
 
-void WasmScriptRuntime::wasmMapRef(int32_t refIdx, int32_t callbackId)
+void WasmScriptRuntime::wasmMapRef(int32_t refIdx, WasmModule* mod, int32_t callbackId)
 {
-        m_refToCallbackId[refIdx] = callbackId;
+        m_refToCallbackId[refIdx] = { mod, callbackId };
 }
 
-void WasmScriptRuntime::wasmDuplicateRef(int32_t callbackId)
-{
-        if (!m_hasDuplicateRefFn || !m_store)
-                return;
-        wasmtime_val_t a[1] = { I32Val(callbackId) };
-        wasmtime_val_t ret{ };
-        WasmCall(m_store, m_fnDuplicateRef, a, 1, &ret, 1, m_resourceName.c_str(), "duplicate_ref trap");
-}
-
-void WasmScriptRuntime::wasmRemoveRef(int32_t callbackId)
-{
-        if (!m_hasRemoveRefFn || !m_store)
-                return;
-        wasmtime_val_t a[1] = { I32Val(callbackId) };
-        WasmCall(m_store, m_fnRemoveRef, a, 1, nullptr, 0, m_resourceName.c_str(), "remove_ref trap");
-}
-
-void WasmScriptRuntime::defineImports()
+void WasmScriptRuntime::defineImports(WasmModule& mod)
 {
         auto** types = CachedImportFuncTypes();
         for (size_t i = 0; i < NUM_IMPORTS; ++i)
         {
                 const auto& imp = g_imports[i];
-                auto* err = wasmtime_linker_define_func(m_linker, "cfx", 3, imp.name, strlen(imp.name), types[i], imp.hostCb, this, nullptr);
+                auto* err = wasmtime_linker_define_func(mod.linker, "cfx", 3, imp.name, strlen(imp.name), types[i], imp.hostCb, &mod, nullptr);
                 if (err)
                         LogError("failed to define import '%s': %s", imp.name, ExtractWasmError(err, nullptr).c_str());
         }
 }
 
-bool WasmScriptRuntime::resolveExports()
+bool WasmScriptRuntime::resolveExports(WasmModule& mod)
 {
-        auto* ctx = wasmtime_store_context(m_store);
+        auto* ctx = wasmtime_store_context(mod.store);
         auto get = [&](const char* name, wasmtime_func_t& fn) -> bool
         {
                 wasmtime_extern_t ext{ };
-                if (!wasmtime_instance_export_get(ctx, &m_instance, name, strlen(name), &ext))
+                if (!wasmtime_instance_export_get(ctx, &mod.instance, name, strlen(name), &ext))
                         return false;
                 if (ext.kind != WASMTIME_EXTERN_FUNC)
                         return false;
@@ -1482,27 +1513,27 @@ bool WasmScriptRuntime::resolveExports()
                 wasmtime_func_t initFn{ };
                 if (!get("__cfx_init", initFn))
                 {
-                        LogError("'%s' missing __cfx_init export", m_resourceName.c_str());
+                        LogError("'%s' in resource '%s' missing __cfx_init export", mod.scriptFile.c_str(), m_resourceName.c_str());
                         return false;
                 }
-                if (!WasmCall(m_store, initFn, nullptr, 0, nullptr, 0, m_resourceName.c_str(), "__cfx_init trap"))
+                if (!mod.call(initFn, nullptr, 0, nullptr, 0, "__cfx_init trap"))
                         return false;
         }
-        m_hasTickFn = get("__cfx_on_tick", m_fnTick);
-        m_hasEventFn = get("__cfx_on_event", m_fnEvent);
-        m_hasStopFn = get("__cfx_on_stop", m_fnStop);
-        m_hasAllocFn = get("__cfx_alloc", m_fnAlloc);
-        m_hasFreeFn = get("__cfx_free", m_fnFree);
-        m_hasInvokeRefFn = get("__cfx_invoke_ref", m_fnInvokeRef);
-        m_hasDuplicateRefFn = get("__cfx_duplicate_ref", m_fnDuplicateRef);
-        m_hasRemoveRefFn = get("__cfx_remove_ref", m_fnRemoveRef);
-        m_hasHasPendingWorkFn = get("__cfx_has_pending_work", m_fnHasPendingWork);
-        m_hasTickBookmarksFn = get("__cfx_tick_bookmarks", m_fnTickBookmarks);
+        mod.hasTickFn = get("__cfx_on_tick", mod.fnTick);
+        mod.hasEventFn = get("__cfx_on_event", mod.fnEvent);
+        mod.hasStopFn = get("__cfx_on_stop", mod.fnStop);
+        mod.hasAllocFn = get("__cfx_alloc", mod.fnAlloc);
+        mod.hasFreeFn = get("__cfx_free", mod.fnFree);
+        mod.hasInvokeRefFn = get("__cfx_invoke_ref", mod.fnInvokeRef);
+        mod.hasDuplicateRefFn = get("__cfx_duplicate_ref", mod.fnDuplicateRef);
+        mod.hasRemoveRefFn = get("__cfx_remove_ref", mod.fnRemoveRef);
+        mod.hasHasPendingWorkFn = get("__cfx_has_pending_work", mod.fnHasPendingWork);
+        mod.hasTickBookmarksFn = get("__cfx_tick_bookmarks", mod.fnTickBookmarks);
         wasmtime_extern_t memExt{ };
-        if (wasmtime_instance_export_get(ctx, &m_instance, "memory", 6, &memExt) && memExt.kind == WASMTIME_EXTERN_MEMORY)
+        if (wasmtime_instance_export_get(ctx, &mod.instance, "memory", 6, &memExt) && memExt.kind == WASMTIME_EXTERN_MEMORY)
         {
-                m_memory = memExt.of.memory;
-                m_hasMemory = true;
+                mod.memory = memExt.of.memory;
+                mod.hasMemory = true;
         }
         return true;
 }
@@ -1586,7 +1617,7 @@ static struct OrphanedWorkerList
 
 static std::atomic<bool> g_serverTicking{ false };
 
-void WasmScriptRuntime::destroyWasm()
+void WasmScriptRuntime::destroyWorkers()
 {
         g_orphanedWorkers.reap();
         if (!m_workers.empty())
@@ -1626,93 +1657,111 @@ void WasmScriptRuntime::destroyWasm()
                 }
         }
         m_workers.clear();
-        m_wasmToHostBookmark.clear();
-        m_hostToWasmBookmark.clear();
-        if (m_linker)
-        {
-                wasmtime_linker_delete(m_linker);
-                m_linker = nullptr;
-        }
-        if (m_module)
-        {
-                wasmtime_module_delete(m_module);
-                m_module = nullptr;
-        }
-        if (m_store)
-        {
-                wasmtime_store_delete(m_store);
-                m_store = nullptr;
-        }
-        m_hasMemory = false;
-        m_hasTickFn = false;
-        m_hasEventFn = false;
-        m_hasStopFn = false;
-        m_hasAllocFn = false;
-        m_hasFreeFn = false;
-        m_hasInvokeRefFn = false;
-        m_hasDuplicateRefFn = false;
-        m_hasRemoveRefFn = false;
-        m_hasHasPendingWorkFn = false;
-        m_hasTickBookmarksFn = false;
 }
 
-result_t WasmScriptRuntime::loadWasm(const std::vector<uint8_t>& wasmBytes, const std::string& sourcePath)
+void WasmScriptRuntime::destroyModule(WasmModule& mod)
 {
-        if (m_store)
-                destroyWasm();
-        m_store = wasmtime_store_new(engine(), this, nullptr);
-        wasmtime_store_limiter(m_store, WASM_MEMORY_LIMIT, -1, -1, -1, -1);
-        m_linker = wasmtime_linker_new(engine());
-        wasmtime_linker_allow_shadowing(m_linker, true);
+        for (auto it = m_hostToWasmBookmark.begin(); it != m_hostToWasmBookmark.end(); )
         {
-                auto* err = wasmtime_linker_define_wasi(m_linker);
+                if (it->second.mod == &mod)
+                        it = m_hostToWasmBookmark.erase(it);
+                else
+                        ++it;
+        }
+        for (auto it = m_refToCallbackId.begin(); it != m_refToCallbackId.end(); )
+        {
+                if (it->second.mod == &mod)
+                {
+                        m_refs.erase(it->first);
+                        it = m_refToCallbackId.erase(it);
+                }
+                else
+                        ++it;
+        }
+        for (auto& [id, w] : m_workers)
+        {
+                if (w->owner == &mod)
+                        w->owner = nullptr;
+        }
+        mod.wasmToHostBookmark.clear();
+        if (mod.linker)
+        {
+                wasmtime_linker_delete(mod.linker);
+                mod.linker = nullptr;
+        }
+        if (mod.module)
+        {
+                wasmtime_module_delete(mod.module);
+                mod.module = nullptr;
+        }
+        if (mod.store)
+        {
+                wasmtime_store_delete(mod.store);
+                mod.store = nullptr;
+        }
+        mod.hasMemory = false;
+        mod.hasTickFn = false;
+        mod.hasEventFn = false;
+        mod.hasStopFn = false;
+        mod.hasAllocFn = false;
+        mod.hasFreeFn = false;
+        mod.hasInvokeRefFn = false;
+        mod.hasDuplicateRefFn = false;
+        mod.hasRemoveRefFn = false;
+        mod.hasHasPendingWorkFn = false;
+        mod.hasTickBookmarksFn = false;
+}
+
+result_t WasmScriptRuntime::loadWasm(const std::vector<uint8_t>& wasmBytes, const std::string& scriptFile, const std::string& sourcePath)
+{
+        auto mod = std::make_shared<WasmModule>();
+        mod->rt = this;
+        mod->scriptFile = scriptFile;
+        mod->store = wasmtime_store_new(engine(), mod.get(), nullptr);
+        wasmtime_store_limiter(mod->store, WASM_MEMORY_LIMIT, -1, -1, -1, -1);
+        mod->linker = wasmtime_linker_new(engine());
+        wasmtime_linker_allow_shadowing(mod->linker, true);
+        {
+                auto* err = wasmtime_linker_define_wasi(mod->linker);
                 if (err)
                         LogWarning("WASI linker error in '%s': %s", m_resourceName.c_str(), ExtractWasmError(err, nullptr).c_str());
                 wasi_config_t* wasi = wasi_config_new();
-                auto* werr = wasmtime_context_set_wasi(wasmtime_store_context(m_store), wasi);
+                auto* werr = wasmtime_context_set_wasi(wasmtime_store_context(mod->store), wasi);
                 if (werr)
                         LogWarning("WASI context error in '%s': %s", m_resourceName.c_str(), ExtractWasmError(werr, nullptr).c_str());
         }
-        defineImports();
-        wasmtime_context_set_fuel(wasmtime_store_context(m_store), WASM_FUEL_AMOUNT);
+        defineImports(*mod);
+        mod->refuelWasm();
         {
-                wasmtime_error_t* err = wasmtime_module_new(engine(), wasmBytes.data(), wasmBytes.size(), &m_module);
+                wasmtime_error_t* err = wasmtime_module_new(engine(), wasmBytes.data(), wasmBytes.size(), &mod->module);
                 if (err)
                 {
                         LogError("Compile error in '%s': %s", sourcePath.c_str(), ExtractWasmError(err, nullptr).c_str());
-                        destroyWasm();
+                        destroyModule(*mod);
                         return FX_E_INVALIDARG;
                 }
         }
         {
                 wasm_trap_t* trap = nullptr;
-                auto* err = wasmtime_linker_instantiate(m_linker, wasmtime_store_context(m_store), m_module, &m_instance, &trap);
+                auto* err = wasmtime_linker_instantiate(mod->linker, wasmtime_store_context(mod->store), mod->module, &mod->instance, &trap);
                 if (err || trap)
                 {
                         LogError("Instantiate error in '%s': %s", sourcePath.c_str(), ExtractWasmError(err, trap).c_str());
-                        destroyWasm();
+                        destroyModule(*mod);
                         return FX_E_INVALIDARG;
                 }
         }
-        {
-                fx::OMPtr<IScriptHostWithBookmarks> bh;
-                if (FX_SUCCEEDED(m_host.As(&bh)) && bh.GetRef())
-                {
-                        m_bookmarkHost = bh;
-                        m_bookmarkHost->CreateBookmarks(static_cast<IScriptTickRuntimeWithBookmarks*>(this));
-                }
-        }
-
-        refuelWasm();
+        m_modules.push_back(mod);
+        mod->refuelWasm();
         fx::PushEnvironment envGuard(static_cast<IScriptRuntime*>(this));
-        if (!resolveExports())
+        if (!resolveExports(*mod))
         {
-                destroyWasm();
-
+                std::erase(m_modules, mod);
+                destroyModule(*mod);
                 return FX_E_INVALIDARG;
         }
         {
-                std::string msg = "Warning: WebAssembly " + m_resourceName + "/" + m_scriptFile + " has been loaded into the webassembly rt. This runtime is still in beta and shouldn't be used in production, crashes and breaking changes are to be expected.";
+                std::string msg = "Warning: WebAssembly " + m_resourceName + "/" + scriptFile + " has been loaded into the webassembly rt. This runtime is still in beta and shouldn't be used in production, crashes and breaking changes are to be expected.";
                 if (m_host.GetRef())
                         m_host->ScriptTrace(Mut(msg));
                 LogWarning("%s", msg.c_str());
@@ -1724,61 +1773,84 @@ result_t OM_DECL WasmScriptRuntime::Tick()
 {
         g_orphanedWorkers.reap();
         g_serverTicking.store(true, std::memory_order_relaxed);
-        if (m_compileJob && m_compileJob->done.load(std::memory_order_acquire))
-                finishCompile();
-        if (!m_hasTickFn)
+        drainPendingLoads();
+        if (m_modules.empty())
                 return FX_S_OK;
-        refuelWasm();
+        auto modules = m_modules;
         fx::PushEnvironment env(static_cast<IScriptRuntime*>(this));
-        if (m_hasHasPendingWorkFn)
+        for (auto& mod : modules)
         {
-                wasmtime_val_t ret{ };
-                if (!WasmCall(m_store, m_fnHasPendingWork, nullptr, 0, &ret, 1, m_resourceName.c_str(), "has_pending_work trap"))
-                        return FX_S_OK;
-                if (ret.of.i32 == 0)
-                        return FX_S_OK;
-        }
-        BoundaryGuard boundary(m_host.GetRef(), static_cast<int64_t>(nextBoundaryId()));
-        if (!callVoid(m_fnTick) && m_host.GetRef())
-        {
-                std::string msg = "^1SCRIPT ERROR: @" + m_resourceName + ": WASM trap in tick handler^7\n";
-                m_host->ScriptTrace(Mut(msg));
+                if (!mod->hasTickFn || !mod->store)
+                        continue;
+                mod->refuelWasm();
+                if (mod->hasHasPendingWorkFn)
+                {
+                        wasmtime_val_t ret{ };
+                        if (!mod->call(mod->fnHasPendingWork, nullptr, 0, &ret, 1, "has_pending_work trap"))
+                                continue;
+                        if (ret.of.i32 == 0)
+                                continue;
+                }
+                BoundaryGuard boundary(m_host.GetRef(), static_cast<int64_t>(nextBoundaryId()));
+                if (!mod->callVoid(mod->fnTick) && m_host.GetRef())
+                {
+                        std::string msg = "^1SCRIPT ERROR: @" + m_resourceName + "/" + mod->scriptFile + ": WASM trap in tick handler^7\n";
+                        m_host->ScriptTrace(Mut(msg));
+                }
         }
         return FX_S_OK;
 }
 
 result_t OM_DECL WasmScriptRuntime::TickBookmarks(uint64_t* bookmarks, int32_t numBookmarks)
 {
-        if (!m_hasTickBookmarksFn || numBookmarks <= 0)
+        if (numBookmarks <= 0 || m_modules.empty())
                 return FX_S_OK;
+        auto modules = m_modules;
+        fx::PushEnvironment env(static_cast<IScriptRuntime*>(this));
+        WasmModule* runMod = nullptr;
         std::vector<int32_t> wasmIds;
-        wasmIds.reserve(numBookmarks);
+        auto flush = [&]()
+        {
+                if (!runMod || wasmIds.empty())
+                        return;
+                auto it = std::find_if(modules.begin(), modules.end(), [&](const std::shared_ptr<WasmModule>& m) { return m.get() == runMod; });
+                if (it == modules.end() || !(*it)->hasTickBookmarksFn || !(*it)->store)
+                {
+                        wasmIds.clear();
+                        return;
+                }
+                auto& mod = **it;
+                uint32_t arrSize = static_cast<uint32_t>(wasmIds.size() * sizeof(int32_t));
+                mod.refuelWasm();
+                uint32_t arrPtr = mod.wasmAlloc(arrSize);
+                if (arrPtr)
+                {
+                        uint8_t* base = mod.wasmBase();
+                        size_t memSz = mod.wasmMemSize();
+                        if (InBounds(memSz, arrPtr, arrSize))
+                        {
+                                memcpy(base + arrPtr, wasmIds.data(), arrSize);
+                                BoundaryGuard boundary(m_host.GetRef(), static_cast<int64_t>(nextBoundaryId()));
+                                wasmtime_val_t args[2] = { I32Val(static_cast<int32_t>(arrPtr)), I32Val(static_cast<int32_t>(wasmIds.size())) };
+                                mod.call(mod.fnTickBookmarks, args, 2, nullptr, 0, "tick_bookmarks trap");
+                        }
+                        mod.wasmFree(arrPtr, arrSize);
+                }
+                wasmIds.clear();
+        };
         for (int32_t i = 0; i < numBookmarks; ++i)
         {
                 auto it = m_hostToWasmBookmark.find(bookmarks[i]);
-                if (it != m_hostToWasmBookmark.end())
-                        wasmIds.push_back(it->second);
+                if (it == m_hostToWasmBookmark.end())
+                        continue;
+                if (it->second.mod != runMod)
+                {
+                        flush();
+                        runMod = it->second.mod;
+                }
+                wasmIds.push_back(it->second.wasmId);
         }
-        if (wasmIds.empty())
-                return FX_S_OK;
-        uint32_t arrSize = static_cast<uint32_t>(wasmIds.size() * sizeof(int32_t));
-        refuelWasm();
-        uint32_t arrPtr = wasmAlloc(arrSize);
-        if (!arrPtr)
-                return FX_S_OK;
-        uint8_t* base = wasmBase();
-        size_t memSz = wasmMemSize();
-        if (!InBounds(memSz, arrPtr, arrSize))
-        {
-                wasmFree(arrPtr, arrSize);
-                return FX_S_OK;
-        }
-        memcpy(base + arrPtr, wasmIds.data(), arrSize);
-        fx::PushEnvironment env(static_cast<IScriptRuntime*>(this));
-        BoundaryGuard boundary(m_host.GetRef(), static_cast<int64_t>(nextBoundaryId()));
-        wasmtime_val_t args[2] = { I32Val(static_cast<int32_t>(arrPtr)), I32Val(static_cast<int32_t>(wasmIds.size())) };
-        bool ok = WasmCall(m_store, m_fnTickBookmarks, args, 2, nullptr, 0, m_resourceName.c_str(), "tick_bookmarks trap");
-        wasmFree(arrPtr, arrSize);
+        flush();
         return FX_S_OK;
 }
 
@@ -1786,7 +1858,7 @@ result_t OM_DECL WasmScriptRuntime::TriggerEvent(char* eventName, char* argsSeri
 {
         if (!eventName)
                 return FX_S_OK;
-        if (!m_hasEventFn)
+        if (std::none_of(m_modules.begin(), m_modules.end(), [](const std::shared_ptr<WasmModule>& m) { return m->hasEventFn; }))
                 return FX_S_OK;
         fx::PushEnvironment env(static_cast<IScriptRuntime*>(this));
         BoundaryGuard boundary(m_host.GetRef(), static_cast<int64_t>(nextBoundaryId()));
@@ -1801,35 +1873,40 @@ result_t OM_DECL WasmScriptRuntime::TriggerEvent(char* eventName, char* argsSeri
                 return FX_S_OK;
         uint32_t nameAllocSz = static_cast<uint32_t>(nameAllocSz64);
         uint32_t argsAllocSz = static_cast<uint32_t>(argsAllocSz64);
-        uint32_t srcAllocSz = static_cast<uint32_t>(srcAllocSz64);
         uint32_t totalSz = static_cast<uint32_t>(totalSz64);
-        refuelWasm();
-        uint32_t block = wasmAlloc(totalSz);
-        if (!block)
-                return FX_S_OK;
-        uint32_t nameWasm = block;
-        uint32_t argsWasm = block + nameAllocSz;
-        uint32_t srcWasm = block + nameAllocSz + argsAllocSz;
-        uint8_t* base = wasmBase();
-        size_t memSz = wasmMemSize();
-        if (!InBounds(memSz, block, totalSz))
+        auto modules = m_modules;
+        for (auto& mod : modules)
         {
-                wasmFree(block, totalSz);
-                return FX_S_OK;
+                if (!mod->hasEventFn || !mod->store)
+                        continue;
+                mod->refuelWasm();
+                uint32_t block = mod->wasmAlloc(totalSz);
+                if (!block)
+                        continue;
+                uint32_t nameWasm = block;
+                uint32_t argsWasm = block + nameAllocSz;
+                uint32_t srcWasm = block + nameAllocSz + argsAllocSz;
+                uint8_t* base = mod->wasmBase();
+                size_t memSz = mod->wasmMemSize();
+                if (!InBounds(memSz, block, totalSz))
+                {
+                        mod->wasmFree(block, totalSz);
+                        continue;
+                }
+                memcpy(base + nameWasm, name.data(), name.size());
+                base[nameWasm + name.size()] = '\0';
+                if (serializedSize > 0)
+                        memcpy(base + argsWasm, argsSerialized, serializedSize);
+                memcpy(base + srcWasm, src.data(), src.size());
+                base[srcWasm + src.size()] = '\0';
+                bool eventOk = mod->callEvent(nameWasm, static_cast<uint32_t>(name.size()), argsWasm, serializedSize, srcWasm, static_cast<uint32_t>(src.size()));
+                if (!eventOk && m_host.GetRef())
+                {
+                        std::string msg = "^1SCRIPT ERROR: @" + m_resourceName + "/" + mod->scriptFile + ": WASM trap in event '" + eventName + "'^7\n";
+                        m_host->ScriptTrace(Mut(msg));
+                }
+                mod->wasmFree(block, totalSz);
         }
-        memcpy(base + nameWasm, name.data(), name.size());
-        base[nameWasm + name.size()] = '\0';
-        if (serializedSize > 0)
-                memcpy(base + argsWasm, argsSerialized, serializedSize);
-        memcpy(base + srcWasm, src.data(), src.size());
-        base[srcWasm + src.size()] = '\0';
-        bool eventOk = callEvent(nameWasm, static_cast<uint32_t>(name.size()), argsWasm, serializedSize, srcWasm, static_cast<uint32_t>(src.size()));
-        if (!eventOk && m_host.GetRef())
-        {
-                std::string msg = "^1SCRIPT ERROR: @" + m_resourceName + ": WASM trap in event '" + eventName + "'^7\n";
-                m_host->ScriptTrace(Mut(msg));
-        }
-        wasmFree(block, totalSz);
         return FX_S_OK;
 }
 
@@ -1876,8 +1953,9 @@ result_t OM_DECL WasmScriptRuntime::DuplicateRef(int32_t refIdx, int32_t* newRef
         auto cit = m_refToCallbackId.find(refIdx);
         if (cit != m_refToCallbackId.end())
         {
-                m_refToCallbackId.emplace(*newRefIdx, cit->second);
-                wasmDuplicateRef(cit->second);
+                WasmRef ref = cit->second;
+                m_refToCallbackId.emplace(*newRefIdx, ref);
+                ref.mod->duplicateRef(ref.callbackId);
         }
         return FX_S_OK;
 }
@@ -1887,8 +1965,9 @@ result_t OM_DECL WasmScriptRuntime::RemoveRef(int32_t refIdx)
         auto cit = m_refToCallbackId.find(refIdx);
         if (cit != m_refToCallbackId.end())
         {
-                wasmRemoveRef(cit->second);
+                WasmRef ref = cit->second;
                 m_refToCallbackId.erase(cit);
+                ref.mod->removeRef(ref.callbackId);
         }
         m_refs.erase(refIdx);
         return FX_S_OK;
@@ -2117,24 +2196,24 @@ static void writeSdkStamp(const std::string& wasmPath)
         fclose(f);
 }
 
-static bool depsChanged(const std::string& wasmPath)
+static bool readTextFile(const std::string& path, std::string& data)
 {
-        FILE* f = fopen((wasmPath + ".d").c_str(), "rb");
+        FILE* f = fopen(path.c_str(), "rb");
         if (!f)
-                return true;
-        std::string data;
+                return false;
         char buf[4096];
         size_t n;
         while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
                 data.append(buf, n);
         fclose(f);
+        return true;
+}
+
+static bool parseDepRule(const std::string& data, std::vector<std::string>& deps)
+{
         size_t pos = data.find(": ");
         if (pos == std::string::npos)
-                return true;
-        auto stale = [&](const std::string& dep)
-        {
-                return !fileExists(dep) || isNewer(dep, wasmPath);
-        };
+                return false;
         std::string dep;
         for (size_t i = pos + 2; i < data.size(); i++)
         {
@@ -2162,13 +2241,29 @@ static bool depsChanged(const std::string& wasmPath)
                         dep += c;
                         continue;
                 }
-                if (!dep.empty() && stale(dep))
-                        return true;
+                if (!dep.empty())
+                        deps.push_back(std::move(dep));
                 dep.clear();
                 if (c == '\n')
                         break;
         }
-        return !dep.empty() && stale(dep);
+        if (!dep.empty())
+                deps.push_back(std::move(dep));
+        return true;
+}
+
+static bool depsChanged(const std::string& wasmPath)
+{
+        std::string data;
+        std::vector<std::string> deps;
+        if (!readTextFile(wasmPath + ".d", data) || !parseDepRule(data, deps))
+                return true;
+        for (const auto& dep : deps)
+        {
+                if (!fileExists(dep) || isNewer(dep, wasmPath))
+                        return true;
+        }
+        return false;
 }
 
 static bool processFailed(const fx::ProcessResult& result, std::string& reason)
@@ -2181,21 +2276,6 @@ static bool processFailed(const fx::ProcessResult& result, std::string& reason)
                 reason = "exit " + std::to_string(result.exitCode);
         else
                 return false;
-        return true;
-}
-
-static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& resourceName)
-{
-        auto result = fx::spawnProgram({ "zig", "c++", "-target", "wasm32-wasi", "-std=c++23", "-O2", "-fno-exceptions", "-mexec-model=reactor", "-Wl,--export-memory",
-                "-I" + sdkPath, "-MMD", "-MF", wasmPath + ".d", cppPath, "-o", wasmPath }, 1048576, 60000);
-        std::string reason;
-        if (processFailed(result, reason))
-        {
-                LogError("Failed to compile '%s' in resource '%s' (%s):\n%s", cppPath.c_str(), resourceName.c_str(), reason.c_str(), result.output.c_str());
-                return false;
-        }
-        if (!result.output.empty())
-                LogInfo("[%s] %s", resourceName.c_str(), result.output.c_str());
         return true;
 }
 
@@ -2257,7 +2337,9 @@ static bool compileRust(const std::string& rsPath, const std::string& wasmPath, 
         std::string rlib = ensureRustRlib(sdkPath);
         if (rlib.empty())
                 return false;
-        auto result = fx::spawnProgram({ "rustc", "--crate-type", "cdylib", "--edition", "2021", "-O", "--target", "wasm32-wasip1", "-C", "link-args=--export-memory", "--extern", "cfx=" + rlib, rsPath, "--emit=link=" + wasmPath + ",dep-info=" + wasmPath + ".d" }, 1048576, 120000);
+        size_t slash = wasmPath.rfind('/');
+        std::string outDir = slash == std::string::npos ? std::string(".") : wasmPath.substr(0, slash);
+        auto result = fx::spawnProgram({ "rustc", "--crate-type", "cdylib", "--edition", "2021", "-O", "--target", "wasm32-wasip1", "-C", "link-args=--export-memory", "--extern", "cfx=" + rlib, rsPath, "--out-dir", outDir, "--emit=link=" + wasmPath + ",dep-info=" + wasmPath + ".d" }, 1048576, 120000);
         std::string reason;
         if (processFailed(result, reason))
         {
@@ -2311,15 +2393,165 @@ static bool ReadFileBytes(const std::string& path, const std::string& resolvedRo
 static std::mutex g_compileJobsMutex;
 static std::unordered_map<std::string, std::shared_ptr<WasmScriptRuntime::CompileJob>> g_compileJobs;
 
-static bool compileResource(const std::string& sourcePath, const std::string& wasmFile, const std::string& sdkPath, const std::string& resourceName, bool rust)
+static bool HasScriptEntry(const std::vector<uint8_t>& src, std::string_view entry, std::string_view openers, bool atLineStart)
 {
-        bool ok = rust ? compileRust(sourcePath, wasmFile, sdkPath, resourceName) : compileCpp(sourcePath, wasmFile, sdkPath, resourceName);
+        auto isIdent = [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; };
+        std::string_view text(reinterpret_cast<const char*>(src.data()), src.size());
+        bool lineStart = true;
+        size_t i = 0;
+        while (i < text.size())
+        {
+                if (text.compare(i, 2, "//") == 0)
+                {
+                        size_t end = text.find('\n', i);
+                        i = end == std::string_view::npos ? text.size() : end;
+                        continue;
+                }
+                if (text.compare(i, 2, "/*") == 0)
+                {
+                        size_t end = text.find("*/", i + 2);
+                        i = end == std::string_view::npos ? text.size() : end + 2;
+                        continue;
+                }
+                char c = text[i];
+                if (c == '\n')
+                {
+                        lineStart = true;
+                        ++i;
+                        continue;
+                }
+                if (std::isspace(static_cast<unsigned char>(c)))
+                {
+                        ++i;
+                        continue;
+                }
+                if ((!atLineStart || lineStart) && text.compare(i, entry.size(), entry) == 0 && (i == 0 || !isIdent(text[i - 1])))
+                {
+                        size_t j = i + entry.size();
+                        while (j < text.size() && std::isspace(static_cast<unsigned char>(text[j])))
+                                ++j;
+                        if (j < text.size() && openers.find(text[j]) != std::string_view::npos)
+                                return true;
+                }
+                lineStart = false;
+                ++i;
+        }
+        return false;
+}
+
+static bool HasCppEntry(const std::vector<uint8_t>& src)
+{
+        return HasScriptEntry(src, "Server", "{", true);
+}
+
+static bool HasRustEntry(const std::vector<uint8_t>& src)
+{
+        return HasScriptEntry(src, "Server!", "{([", false);
+}
+
+static std::string escapeDep(const std::string& path)
+{
+        std::string out;
+        for (char c : path)
+        {
+                if (c == ' ' || c == '#')
+                        out += '\\';
+                else if (c == '$')
+                        out += '$';
+                out += c;
+        }
+        return out;
+}
+
+static bool scanCppDeps(const std::string& cppPath, const std::string& depFile, const std::string& sdkPath, const std::string& resourceName, std::vector<std::string>& deps)
+{
+        auto result = fx::spawnProgram({ "zig", "c++", "-target", "wasm32-wasi", "-std=c++23", "-fno-exceptions", "-I" + sdkPath, "-MM", "-MF", depFile, cppPath }, 1048576, 60000);
+        std::string reason;
+        if (processFailed(result, reason))
+        {
+                unlink(depFile.c_str());
+                LogError("Failed to compile '%s' in resource '%s' (%s):\n%s", cppPath.c_str(), resourceName.c_str(), reason.c_str(), result.output.c_str());
+                return false;
+        }
+        std::string data;
+        bool ok = readTextFile(depFile, data) && parseDepRule(data, deps);
+        unlink(depFile.c_str());
+        if (!ok)
+                LogError("Failed to read dependencies of '%s' in resource '%s'", cppPath.c_str(), resourceName.c_str());
+        return ok;
+}
+
+static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& resourceName, const std::string& root)
+{
+        std::vector<std::string> sources{ cppPath };
+        std::unordered_set<std::string> seenSources{ cppPath };
+        std::vector<std::string> allDeps;
+        std::unordered_set<std::string> seenDeps;
+        for (size_t i = 0; i < sources.size(); ++i)
+        {
+                std::vector<std::string> deps;
+                if (!scanCppDeps(sources[i], wasmPath + ".d.tmp", sdkPath, resourceName, deps))
+                        return false;
+                for (const auto& dep : deps)
+                {
+                        if (seenDeps.insert(dep).second)
+                                allDeps.push_back(dep);
+                        if (!dep.ends_with(".h") && !dep.ends_with(".hpp") && !dep.ends_with(".hh") && !dep.ends_with(".hxx"))
+                                continue;
+                        std::string candidate = dep.substr(0, dep.rfind('.')) + ".cpp";
+                        char* real = realpath(candidate.c_str(), nullptr);
+                        if (!real)
+                                continue;
+                        std::string helper = real;
+                        free(real);
+                        if (!helper.starts_with(root + "/") || seenSources.count(helper))
+                                continue;
+                        std::vector<uint8_t> source;
+                        if (!ReadFileBytes(helper, root, source) || HasCppEntry(source))
+                                continue;
+                        seenSources.insert(helper);
+                        sources.push_back(helper);
+                }
+        }
+        std::vector<std::string> args{ "zig", "c++", "-target", "wasm32-wasi", "-std=c++23", "-O2", "-fno-exceptions", "-mexec-model=reactor", "-Wl,--export-memory", "-I" + sdkPath };
+        args.insert(args.end(), sources.begin(), sources.end());
+        args.push_back("-o");
+        args.push_back(wasmPath);
+        auto result = fx::spawnProgram(args, 1048576, 60000);
+        std::string reason;
+        if (processFailed(result, reason))
+        {
+                LogError("Failed to compile '%s' in resource '%s' (%s):\n%s", cppPath.c_str(), resourceName.c_str(), reason.c_str(), result.output.c_str());
+                return false;
+        }
+        if (!result.output.empty())
+                LogInfo("[%s] %s", resourceName.c_str(), result.output.c_str());
+        std::string depInfo = escapeDep(wasmPath) + ":";
+        for (const auto& dep : allDeps)
+                depInfo += " " + escapeDep(dep);
+        depInfo += "\n";
+        FILE* f = fopen((wasmPath + ".d").c_str(), "wb");
+        if (!f || fwrite(depInfo.data(), 1, depInfo.size(), f) != depInfo.size())
+        {
+                if (f)
+                        fclose(f);
+                unlink((wasmPath + ".d").c_str());
+                LogError("Failed to write dependency info for '%s' in resource '%s'", cppPath.c_str(), resourceName.c_str());
+                return false;
+        }
+        fclose(f);
+        return true;
+}
+
+static bool compileResource(const std::string& sourcePath, const std::string& wasmFile, const std::string& sdkPath, const std::string& resourceName, const std::string& root, bool rust)
+{
+        bool ok = rust ? compileRust(sourcePath, wasmFile, sdkPath, resourceName) : compileCpp(sourcePath, wasmFile, sdkPath, resourceName, root);
         if (ok)
                 writeSdkStamp(wasmFile);
         return ok;
 }
 
-static void RunCompileJob(std::shared_ptr<WasmScriptRuntime::CompileJob> job, std::shared_ptr<WasmScriptRuntime::CompileJob> prev, std::string sourcePath, std::string sdkPath, std::string resourceName, bool rust)
+static void RunCompileJob(std::shared_ptr<WasmScriptRuntime::CompileJob> job, std::shared_ptr<WasmScriptRuntime::CompileJob> prev, std::string sourcePath, std::string sdkPath, std::string resourceName, std::string root, bool rust)
 {
         if (prev)
         {
@@ -2327,7 +2559,7 @@ static void RunCompileJob(std::shared_ptr<WasmScriptRuntime::CompileJob> job, st
                         std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 prev.reset();
         }
-        bool ok = !job->cancelled.load(std::memory_order_relaxed) && compileResource(sourcePath, job->wasmFile, sdkPath, resourceName, rust);
+        bool ok = !job->cancelled.load(std::memory_order_relaxed) && compileResource(sourcePath, job->wasmFile, sdkPath, resourceName, root, rust);
         {
                 std::lock_guard<std::mutex> lk(g_compileJobsMutex);
                 auto it = g_compileJobs.find(job->wasmFile);
@@ -2338,31 +2570,61 @@ static void RunCompileJob(std::shared_ptr<WasmScriptRuntime::CompileJob> job, st
         job->done.store(true, std::memory_order_release);
 }
 
-void WasmScriptRuntime::finishCompile()
+void WasmScriptRuntime::drainPendingLoads()
 {
-        std::shared_ptr<CompileJob> job = std::move(m_compileJob);
-        m_compileJob = nullptr;
-        if (!job->ok)
-                return;
-        std::vector<uint8_t> wasmBytes;
-        if (!ReadFileBytes(job->wasmFile, m_compileRoot, wasmBytes))
         {
-                LogError("Failed to read '%s'", job->wasmFile.c_str());
-                return;
+                std::lock_guard<std::mutex> lk(g_compileJobsMutex);
+                for (auto& load : m_pendingLoads)
+                {
+                        while (load.job && load.job->cancelled.load(std::memory_order_relaxed) && load.job->successor)
+                                load.job = load.job->successor;
+                }
         }
-        loadWasm(wasmBytes, job->wasmFile);
+        size_t ready = 0;
+        while (ready < m_pendingLoads.size() && (!m_pendingLoads[ready].job || m_pendingLoads[ready].job->done.load(std::memory_order_acquire)))
+                ++ready;
+        if (ready == 0)
+                return;
+        std::vector<PendingLoad> loads(std::make_move_iterator(m_pendingLoads.begin()), std::make_move_iterator(m_pendingLoads.begin() + ready));
+        m_pendingLoads.erase(m_pendingLoads.begin(), m_pendingLoads.begin() + ready);
+        for (auto& load : loads)
+        {
+                if (load.job && !load.job->ok)
+                        continue;
+                std::vector<uint8_t> wasmBytes;
+                if (!ReadFileBytes(load.wasmFile, load.root, wasmBytes))
+                {
+                        LogError("Failed to read '%s'", load.wasmFile.c_str());
+                        continue;
+                }
+                loadWasm(wasmBytes, load.scriptFile, load.wasmFile);
+        }
 }
 
 result_t OM_DECL WasmScriptRuntime::LoadFile(char* scriptFile)
 {
         if (!m_host.GetRef() || !scriptFile)
                 return FX_E_INVALIDARG;
-        std::string root = GetResourcePath(m_host.GetRef());
+        std::string_view file(scriptFile);
+        std::string rootResource = m_resourceName;
+        const char* relativeFile = scriptFile;
+        if (file.starts_with('@'))
+        {
+                size_t slash = file.find('/');
+                if (slash == std::string_view::npos || slash == 1 || slash + 1 == file.size())
+                {
+                        LogError("Invalid script path '%s' in resource '%s', expected '@resource/file'", scriptFile, m_resourceName.c_str());
+                        return FX_E_INVALIDARG;
+                }
+                rootResource = std::string(file.substr(1, slash - 1));
+                relativeFile = scriptFile + slash + 1;
+        }
+        std::string root = GetResourcePath(m_host.GetRef(), rootResource);
         if (!root.empty() && root.back() == '/')
                 root.pop_back();
         if (root.empty())
         {
-                LogError("Could not get resource path for '%s'", m_resourceName.c_str());
+                LogError("Could not get resource path for '%s'", rootResource.c_str());
                 return FX_E_INVALIDARG;
         }
         {
@@ -2374,11 +2636,40 @@ result_t OM_DECL WasmScriptRuntime::LoadFile(char* scriptFile)
                 }
         }
         std::string resolvedPath, resolvedRoot;
-        if (!ValidateScriptPath(scriptFile, root, resolvedPath, resolvedRoot))
+        if (!ValidateScriptPath(relativeFile, root, resolvedPath, resolvedRoot))
                 return FX_E_INVALIDARG;
-        m_scriptFile = scriptFile;
-        std::string_view file(scriptFile);
         std::string wasmFile = resolvedPath;
+        if (file.ends_with(".wasm"))
+        {
+                std::string stem = resolvedPath.substr(0, resolvedPath.size() - 5);
+                for (const char* ext : { ".cpp", ".rs" })
+                {
+                        if (fileExists(stem + ext))
+                        {
+                                LogInfo("Skipping '%s' in resource '%s', it is built from '%.*s%s'", scriptFile, m_resourceName.c_str(), static_cast<int>(file.size() - 5), file.data(), ext);
+                                return FX_S_OK;
+                        }
+                }
+        }
+        if (file.ends_with(".cpp") || file.ends_with(".rs"))
+        {
+                std::vector<uint8_t> source;
+                if (!ReadFileBytes(resolvedPath, resolvedRoot, source))
+                {
+                        LogError("Failed to read '%s'", resolvedPath.c_str());
+                        return FX_E_INVALIDARG;
+                }
+                if (file.ends_with(".rs") && !HasRustEntry(source))
+                {
+                        LogInfo("Skipping '%s' in resource '%s', it has no Server! block and is treated as a module", scriptFile, m_resourceName.c_str());
+                        return FX_S_OK;
+                }
+                if (file.ends_with(".cpp") && !HasCppEntry(source))
+                {
+                        LogInfo("Skipping '%s' in resource '%s', it has no Server block and is treated as a helper", scriptFile, m_resourceName.c_str());
+                        return FX_S_OK;
+                }
+        }
         if (file.ends_with(".cpp") || file.ends_with(".rs"))
         {
                 std::string sdkPath = getSdkPath();
@@ -2389,11 +2680,22 @@ result_t OM_DECL WasmScriptRuntime::LoadFile(char* scriptFile)
                 }
                 size_t extLen = file.ends_with(".cpp") ? 4 : 3;
                 wasmFile = resolvedPath.substr(0, resolvedPath.size() - extLen) + ".wasm";
-                bool stale = !fileExists(wasmFile) || isNewer(resolvedPath, wasmFile) || depsChanged(wasmFile) || !isBuiltWithCurrentSdk(wasmFile);
+                auto [owner, claimed] = m_outputOwners.try_emplace(wasmFile, resolvedPath, scriptFile);
+                if (!claimed && owner->second.first != resolvedPath)
+                {
+                        LogError("'%s' and '%s' in resource '%s' both compile to the same .wasm, rename one of them", owner->second.second.c_str(), scriptFile, m_resourceName.c_str());
+                        return FX_E_INVALIDARG;
+                }
+                bool compiling = false;
+                {
+                        std::lock_guard<std::mutex> lk(g_compileJobsMutex);
+                        compiling = g_compileJobs.count(wasmFile) != 0;
+                }
+                bool stale = compiling || !fileExists(wasmFile) || isNewer(resolvedPath, wasmFile) || depsChanged(wasmFile) || !isBuiltWithCurrentSdk(wasmFile);
                 if (stale && !g_serverTicking.load(std::memory_order_relaxed))
                 {
                         LogInfo("Compiling '%s' in resource '%s'...", scriptFile, m_resourceName.c_str());
-                        if (!compileResource(resolvedPath, wasmFile, sdkPath, m_resourceName, file.ends_with(".rs")))
+                        if (!compileResource(resolvedPath, wasmFile, sdkPath, m_resourceName, resolvedRoot, file.ends_with(".rs")))
                                 return FX_E_INVALIDARG;
                 }
                 else if (stale)
@@ -2404,27 +2706,27 @@ result_t OM_DECL WasmScriptRuntime::LoadFile(char* scriptFile)
                                 std::lock_guard<std::mutex> lk(g_compileJobsMutex);
                                 auto& slot = g_compileJobs[wasmFile];
                                 std::shared_ptr<CompileJob> prev = slot;
-                                if (prev)
-                                        prev->cancelled.store(true, std::memory_order_relaxed);
-                                slot = std::make_shared<CompileJob>();
-                                slot->wasmFile = wasmFile;
+                                job = std::make_shared<CompileJob>();
+                                job->wasmFile = wasmFile;
                                 try
                                 {
-                                        std::thread(RunCompileJob, slot, prev, resolvedPath, sdkPath, m_resourceName, file.ends_with(".rs")).detach();
+                                        std::thread(RunCompileJob, job, prev, resolvedPath, sdkPath, m_resourceName, resolvedRoot, file.ends_with(".rs")).detach();
                                 }
                                 catch (...)
                                 {
-                                        if (prev)
-                                                slot = prev;
-                                        else
+                                        if (!prev)
                                                 g_compileJobs.erase(wasmFile);
                                         LogError("Failed to start compile thread for '%s' in resource '%s'", scriptFile, m_resourceName.c_str());
                                         return FX_E_INVALIDARG;
                                 }
-                                job = slot;
+                                if (prev)
+                                {
+                                        prev->successor = job;
+                                        prev->cancelled.store(true, std::memory_order_relaxed);
+                                }
+                                slot = job;
                         }
-                        m_compileJob = std::move(job);
-                        m_compileRoot = resolvedRoot;
+                        m_pendingLoads.push_back({ std::move(job), scriptFile, wasmFile, resolvedRoot });
                         return FX_S_OK;
                 }
         }
@@ -2433,27 +2735,33 @@ result_t OM_DECL WasmScriptRuntime::LoadFile(char* scriptFile)
                 LogError("Unsupported file type for '%s' in resource '%s'", scriptFile, m_resourceName.c_str());
                 return FX_E_INVALIDARG;
         }
+        if (!m_pendingLoads.empty())
+        {
+                m_pendingLoads.push_back({ nullptr, scriptFile, wasmFile, resolvedRoot });
+                return FX_S_OK;
+        }
         std::vector<uint8_t> wasmBytes;
         if (!ReadFileBytes(wasmFile, resolvedRoot, wasmBytes))
         {
                 LogError("Failed to read '%s'", wasmFile.c_str());
                 return FX_E_INVALIDARG;
         }
-        return loadWasm(wasmBytes, wasmFile);
+        return loadWasm(wasmBytes, scriptFile, wasmFile);
 }
 
 result_t OM_DECL WasmScriptRuntime::WalkStack(char*, uint32_t, char*, uint32_t, IScriptStackWalkVisitor* visitor)
 {
-        if (!visitor)
+        if (!visitor || !m_activeModule)
                 return FX_S_OK;
+        const std::string& scriptFile = m_activeModule->scriptFile;
         fx::MsgpackWriter w;
         w.mapHeader(4);
         w.str("name");
-        w.str(m_scriptFile.empty() ? "[wasm]" : m_scriptFile);
+        w.str(scriptFile.empty() ? "[wasm]" : scriptFile);
         w.str("file");
         w.str(m_resourceName);
         w.str("sourcefile");
-        w.str(m_scriptFile);
+        w.str(scriptFile);
         w.str("line");
         w.encInt(0);
         visitor->SubmitStackFrame(reinterpret_cast<char*>(w.buf.data()), static_cast<uint32_t>(w.buf.size()));
@@ -2469,7 +2777,10 @@ result_t OM_DECL WasmScriptRuntime::GetMemoryUsage(int64_t* memUsage)
 {
         if (!memUsage)
                 return FX_E_INVALIDARG;
-        *memUsage = static_cast<int64_t>(wasmMemSize());
+        size_t total = 0;
+        for (auto& mod : m_modules)
+                total += mod->wasmMemSize();
+        *memUsage = static_cast<int64_t>(total);
         return FX_S_OK;
 }
 

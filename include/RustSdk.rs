@@ -627,7 +627,12 @@ fn create_ref(cb: RefCallbackFn) -> i32 {
         if id < 0 { return -1; }
         unsafe { (*c).ref_callbacks.insert(id, cb) };
         unsafe { (*c).ref_counts.insert(id, 1) };
-        unsafe { __cfx_create_ref(id) }
+        let ref_idx = unsafe { __cfx_create_ref(id) };
+        if ref_idx < 0 {
+                unsafe { (*c).ref_callbacks.remove(&id) };
+                unsafe { (*c).ref_counts.remove(&id) };
+        }
+        ref_idx
 }
 
 fn canonicalize_ref(ref_idx: i32) -> String {

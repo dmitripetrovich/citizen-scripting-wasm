@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[[ $# -eq 1 ]] || { echo "Usage: build <source.cpp|source.rs>" >&2; exit 2; }
+[[ $# -ge 1 ]] || { echo "Usage: build <source.cpp|source.rs> [helper.cpp ...]" >&2; exit 2; }
 
 SRC=$1
+shift
 [[ -f $SRC ]] || { echo "Error: Source not found: $SRC" >&2; exit 1; }
 
 SDK_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -19,10 +20,11 @@ case "$SRC" in
                         -mexec-model=reactor \
                         -I"$SDK_DIR" \
                         -Wl,--export-memory \
-                        "$SRC" \
+                        "$SRC" "$@" \
                         -o "$OUT"
                 ;;
         *.rs)
+                [[ $# -eq 0 ]] || { echo "Error: Rust helpers are pulled in with mod, pass only the script" >&2; exit 2; }
                 RLIB="$SDK_DIR/build/libcfx.rlib"
                 RLIB_SRC="$SDK_DIR/include/RustSdk.rs"
 

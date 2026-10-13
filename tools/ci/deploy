@@ -2,33 +2,29 @@
 set -euo pipefail
 
 usage() {
-        echo "Usage: tools/ci/deploy [--fivem] [--redm] [--cpp | --rust | --runtime-only]"
+        echo "Usage: tools/ci/deploy [--fivem] [--redm] [--cpp] [--rust] [--both | --runtime-only]"
         echo ""
         echo "  --fivem, --redm Generate natives for these games (default: --fivem)"
-        echo "  --cpp Deploy the C++ example resource"
-        echo "  --rust Deploy the Rust example resource"
-        echo "  --runtime-only Deploy the runtime without an example resource"
+        echo "  --cpp Deploy the C++ part of the example resource"
+        echo "  --rust Deploy the Rust part of the example resource"
+        echo "  --both Deploy the whole example resource (same as --cpp --rust)"
+        echo "  --runtime-only Deploy the runtime without the example resource"
         echo ""
-        echo "Without --cpp, --rust or --runtime-only you're asked which example to deploy."
-}
-
-set_choice() {
-        if [ -n "$choice" ] && [ "$choice" != "$1" ]; then
-                echo "Only one of --cpp, --rust or --runtime-only can be given" >&2
-                exit 1
-        fi
-        choice="$1"
+        echo "Without --cpp, --rust, --both or --runtime-only you're asked what to deploy."
 }
 
 GAME_ARGS=()
-choice=""
+want_cpp=false
+want_rust=false
+runtime_only=false
 for arg in "$@"; do
         case "$arg" in
                 --fivem) GAME_ARGS+=(fivem) ;;
                 --redm) GAME_ARGS+=(redm) ;;
-                --cpp) set_choice 1 ;;
-                --rust) set_choice 2 ;;
-                --runtime-only) set_choice 3 ;;
+                --cpp) want_cpp=true ;;
+                --rust) want_rust=true ;;
+                --both) want_cpp=true; want_rust=true ;;
+                --runtime-only) runtime_only=true ;;
                 -h|--help)
                         usage
                         exit 0
@@ -41,12 +37,28 @@ for arg in "$@"; do
         esac
 done
 
+if $runtime_only && { $want_cpp || $want_rust; }; then
+        echo "--runtime-only can't be combined with --cpp, --rust or --both" >&2
+        exit 1
+fi
+
+choice=""
+if $runtime_only; then
+        choice=4
+elif $want_cpp && $want_rust; then
+        choice=3
+elif $want_cpp; then
+        choice=1
+elif $want_rust; then
+        choice=2
+fi
+
 if [ ${#GAME_ARGS[@]} -eq 0 ]; then
         GAME_ARGS=(fivem)
 fi
 
 if [ -z "$choice" ] && [ ! -t 0 ] && [ -c /dev/stdin ]; then
-        echo "Error: Pass --cpp, --rust or --runtime-only" >&2
+        echo "Error: Pass --cpp, --rust, --both or --runtime-only" >&2
         exit 1
 fi
 
@@ -73,12 +85,13 @@ cp "$PROJECT_DIR/component.json" "$SERVER_DIR/libcitizen-scripting-wasm.json"
 
 if [ -z "$choice" ]; then
         echo ""
-        echo "Which example resource do you want to deploy?"
+        echo "Which part of the example resource do you want to deploy?"
         echo "  1) C++"
         echo "  2) Rust"
-        echo "  3) Skip (runtime only)"
+        echo "  3) Both"
+        echo "  4) Skip (runtime only)"
         if ! read -rp "> " choice; then
-                echo "No answer on stdin, pass --cpp, --rust or --runtime-only" >&2
+                echo "No answer on stdin, pass --cpp, --rust, --both or --runtime-only" >&2
                 exit 1
         fi
 fi
@@ -111,22 +124,26 @@ author 'dmitripetrovich'
 description 'DEPLOY_DESC'
 version '1.0.0'"
 
+deploy_example() {
+        local label="$1"
+        shift
+        rm -rf "$RESOURCE_DIR"
+        mkdir -p "$RESOURCE_DIR"
+        local scripts=""
+        for src in "$@"; do
+                mkdir -p "$RESOURCE_DIR/$(dirname "$src")"
+                cp "tools/example/$src" "$RESOURCE_DIR/$src"
+                scripts+="    '$src',"$'\n'
+        done
+        printf '%s\n\nserver_scripts {\n%s}\n' "${MANIFEST_HEADER/DEPLOY_DESC/Example $label resource.}" "$scripts" > "$RESOURCE_DIR/fxmanifest.lua"
+        echo "Resource deployed ($label) -> $RESOURCE_DIR"
+}
+
 case "$choice" in
-        1)
-                rm -rf "$RESOURCE_DIR"
-                mkdir -p "$RESOURCE_DIR"
-                cp tools/example/server.cpp "$RESOURCE_DIR/server.cpp"
-                printf '%s\n\nserver_script '\''server.cpp'\''\n' "${MANIFEST_HEADER/DEPLOY_DESC/Example C++ resource.}" > "$RESOURCE_DIR/fxmanifest.lua"
-                echo "Resource deployed (C++) -> $RESOURCE_DIR"
-                ;;
-        2)
-                rm -rf "$RESOURCE_DIR"
-                mkdir -p "$RESOURCE_DIR"
-                cp tools/example/server.rs "$RESOURCE_DIR/server.rs"
-                printf '%s\n\nserver_script '\''server.rs'\''\n' "${MANIFEST_HEADER/DEPLOY_DESC/Example Rust resource.}" > "$RESOURCE_DIR/fxmanifest.lua"
-                echo "Resource deployed (Rust) -> $RESOURCE_DIR"
-                ;;
-        3)
+        1) deploy_example "C++" cpp/server.cpp ;;
+        2) deploy_example "Rust" rust/server.rs ;;
+        3) deploy_example "C++ and Rust" cpp/server.cpp rust/server.rs ;;
+        4)
                 echo "Skipped resource deployment."
                 ;;
         *)

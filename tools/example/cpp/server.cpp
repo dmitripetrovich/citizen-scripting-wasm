@@ -1,6 +1,8 @@
 #include <include/CppSdk.h>
 #include <src/natives/all.h>
+#include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <unordered_map>
 
@@ -8,6 +10,23 @@ static std::string extractId(const std::string& source)
 {
         auto pos = source.find(':');
         return pos != std::string::npos ? source.substr(pos + 1) : source;
+}
+
+CFX_WORKER(countPrimes)
+{
+        int limit = std::atoi(std::string(input, static_cast<size_t>(input_len)).c_str());
+        int count = 0;
+        for (int n = 2; n < limit; ++n)
+        {
+                bool prime = true;
+                for (int d = 2; d * d <= n && prime; ++d)
+                        prime = n % d != 0;
+                count += prime;
+        }
+        std::string out = std::to_string(count);
+        int32_t len = std::min(static_cast<int32_t>(out.size()), result_max);
+        std::memcpy(result, out.data(), static_cast<size_t>(len));
+        return len;
 }
 
 Server
@@ -69,6 +88,36 @@ Server
                 int ping = cfx::native<int>("GET_PLAYER_PING", src.c_str());
                 return name + " (ping=" + std::to_string(ping) + "ms)";
         });
+
+        cfx::setTimeout(5000, []()
+        {
+                cfx::trace("[cfx::setTimeout] 5 seconds since start.\n");
+        });
+
+        auto minutes = std::make_shared<int>(0);
+        cfx::setInterval(60000, [minutes]()
+        {
+                cfx::trace("[cfx::setInterval] Up for %d minute(s).\n", ++*minutes);
+        });
+
+        int32_t worker = cfx::createWorker("countPrimes", "100000");
+        if (worker < 0)
+                cfx::trace("[cfx::createWorker] Failed to start worker (%d).\n", worker);
+        else
+        {
+                auto poll = std::make_shared<int32_t>(0);
+                *poll = cfx::setInterval(100, [worker, poll]()
+                {
+                        cfx::WorkerResult result = cfx::pollWorker(worker);
+                        if (result.isRunning())
+                                return;
+                        cfx::clearInterval(*poll);
+                        if (result.isDone())
+                                cfx::trace("[cfx::createWorker] %s primes below 100000.\n", result.output.c_str());
+                        else
+                                cfx::trace("[cfx::createWorker] Worker failed (%d).\n", result.status);
+                });
+        }
 
         cfx::onCommand("c++", [](const std::string& source, const std::vector<std::string>&)
         {

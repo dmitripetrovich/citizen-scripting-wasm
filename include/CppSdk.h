@@ -1999,7 +1999,13 @@ inline int32_t createRef(fxw_internal::RefCallbackFn cb)
                 return -1;
         callbacks[id] = std::move(cb);
         fxw_internal::refCounts()[id] = 1;
-        return __cfxCreateRef(id);
+        int32_t ref = __cfxCreateRef(id);
+        if (ref < 0)
+        {
+                callbacks.erase(id);
+                fxw_internal::refCounts().erase(id);
+        }
+        return ref;
 }
 
 inline std::string canonicalizeRef(int32_t refIdx)
@@ -3312,7 +3318,7 @@ inline WorkerResult pollWorker(int32_t workerId, int32_t maxOutput = 4096)
 
 }
 
-#define CFX_WASM_EXPORT(name) extern "C" __attribute__((export_name(#name)))
+#define CFX_WASM_EXPORT(name) extern "C" __attribute__((weak, export_name(#name)))
 
 CFX_WASM_EXPORT(__cfx_alloc)
 void* __cfxAlloc(uint32_t size)
@@ -3507,6 +3513,8 @@ using WasmNativeCtx = fx::NativeCtx;
 // {00F3A7B9-241D-5E4C-8A93-2FA1B2C3D4E5}
 FX_DEFINE_GUID(CLSID_WasmScriptRuntime, 0xF3A7B9, 0x241D, 0x5E4C, 0x8A, 0x93, 0x2F, 0xA1, 0xB2, 0xC3, 0xD4, 0xE5);
 
+struct WasmModule;
+
 class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRuntime, IScriptTickRuntime, IScriptEventRuntime, IScriptRefRuntime, IScriptFileHandlingRuntime, IScriptTickRuntimeWithBookmarks, IScriptStackWalkingRuntime, IScriptMemInfoRuntime, IScriptWarningRuntime, IScriptProfiler>
 {
         friend wasm_trap_t* ::CbInvokeNative(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
@@ -3519,6 +3527,7 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         friend wasm_trap_t* ::CbCreateRef(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
         friend wasm_trap_t* ::CbCreateWorker(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
         friend wasm_trap_t* ::CbPollWorker(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
+        friend struct WasmModule;
 
     public:
         WasmScriptRuntime();
@@ -3574,16 +3583,8 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
                 return m_resourceName;
         }
 
-        uint8_t* wasmBase();
-        size_t wasmMemSize();
-        uint32_t wasmAlloc(uint32_t size);
-        void wasmFree(uint32_t ptr, uint32_t size);
-        bool callVoid(const wasmtime_func_t& fn);
-        bool callEvent(uint32_t namePtr, uint32_t nameLen, uint32_t argsPtr, uint32_t argsLen, uint32_t srcPtr, uint32_t srcLen);
-        bool callInvokeRef(uint32_t callbackId, const char* argsSerialized, uint32_t argsSize, std::vector<char>& result);
-        void wasmMapRef(int32_t refIdx, int32_t callbackId);
-        void wasmDuplicateRef(int32_t callbackId);
-        void wasmRemoveRef(int32_t callbackId);
+        bool callInvokeRef(WasmModule& mod, uint32_t callbackId, const char* argsSerialized, uint32_t argsSize, std::vector<char>& result);
+        void wasmMapRef(int32_t refIdx, WasmModule* mod, int32_t callbackId);
 
         struct WorkerState
         {
@@ -3598,16 +3599,12 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
                 Status status = Running;
                 std::vector<char> result;
                 std::string resourceName;
+                const WasmModule* owner = nullptr;
         };
 
         static constexpr int32_t MAX_WORKERS_PER_RESOURCE = 8;
-        wasmtime_module_t* wasmModule() const
-        {
-                return m_module;
-        }
 
-        void scheduleWasmBookmark(int32_t wasmId, int32_t deadlineMs);
-        void refuelWasm();
+        void scheduleWasmBookmark(WasmModule& mod, int32_t wasmId, int32_t deadlineMs);
         static wasm_engine_t* engine();
 
     private:
@@ -3619,7 +3616,7 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         int32_t m_instanceId = 0;
         bool m_destroyed = false;
         std::string m_resourceName;
-        std::string m_scriptFile;
+        WasmModule* m_activeModule = nullptr;
         std::unordered_map<int32_t, std::shared_ptr<WorkerState>> m_workers;
         int32_t m_nextWorkerId = 1;
         std::unordered_map<int32_t, fx::RefCallback> m_refs;
@@ -3627,31 +3624,13 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         int32_t allocRefIdx();
         uint64_t m_nextBoundaryId = 1;
         uint64_t nextBoundaryId();
-        wasmtime_store_t* m_store = nullptr;
-        wasmtime_module_t* m_module = nullptr;
-        wasmtime_linker_t* m_linker = nullptr;
-        wasmtime_instance_t m_instance{ };
-        wasmtime_memory_t m_memory{ };
-        bool m_hasMemory = false;
-        wasmtime_func_t m_fnTick{ };
-        wasmtime_func_t m_fnEvent{ };
-        wasmtime_func_t m_fnStop{ };
-        wasmtime_func_t m_fnAlloc{ };
-        wasmtime_func_t m_fnFree{ };
-        wasmtime_func_t m_fnInvokeRef{ };
-        wasmtime_func_t m_fnDuplicateRef{ };
-        wasmtime_func_t m_fnRemoveRef{ };
-        wasmtime_func_t m_fnHasPendingWork{ };
-        bool m_hasTickFn = false;
-        bool m_hasEventFn = false;
-        bool m_hasStopFn = false;
-        bool m_hasAllocFn = false;
-        bool m_hasFreeFn = false;
-        bool m_hasInvokeRefFn = false;
-        bool m_hasDuplicateRefFn = false;
-        bool m_hasRemoveRefFn = false;
-        bool m_hasHasPendingWorkFn = false;
-        std::unordered_map<int32_t, int32_t> m_refToCallbackId;
+        std::vector<std::shared_ptr<WasmModule>> m_modules;
+        struct WasmRef
+        {
+                WasmModule* mod = nullptr;
+                int32_t callbackId = 0;
+        };
+        std::unordered_map<int32_t, WasmRef> m_refToCallbackId;
         struct RefGuard
         {
                 std::recursive_mutex mu;
@@ -3660,14 +3639,12 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         };
         std::shared_ptr<RefGuard> m_refGuard = std::make_shared<RefGuard>();
         bool m_eventCanceled = false;
-        bool m_hasValidNativeResult = false;
-        fxNativeContext m_lastNativeCtx{ };
-        uint32_t m_lastResultPtrMask = 0;
-        int32_t m_lastSpawnExitCode = 0;
-        wasmtime_func_t m_fnTickBookmarks{ };
-        bool m_hasTickBookmarksFn = false;
-        std::unordered_map<int32_t, uint64_t> m_wasmToHostBookmark;
-        std::unordered_map<uint64_t, int32_t> m_hostToWasmBookmark;
+        struct WasmBookmark
+        {
+                WasmModule* mod = nullptr;
+                int32_t wasmId = 0;
+        };
+        std::unordered_map<uint64_t, WasmBookmark> m_hostToWasmBookmark;
         uint64_t m_nextWasmHostBookmarkId = 1;
 
     public:
@@ -3677,16 +3654,73 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
                 bool ok = false;
                 std::atomic<bool> done{ false };
                 std::atomic<bool> cancelled{ false };
+                std::shared_ptr<CompileJob> successor;
         };
 
     private:
-        std::shared_ptr<CompileJob> m_compileJob;
-        std::string m_compileRoot;
-        void finishCompile();
-        void defineImports();
-        bool resolveExports();
-        void destroyWasm();
-        result_t loadWasm(const std::vector<uint8_t>& wasmBytes, const std::string& sourcePath);
+        struct PendingLoad
+        {
+                std::shared_ptr<CompileJob> job;
+                std::string scriptFile;
+                std::string wasmFile;
+                std::string root;
+        };
+        std::vector<PendingLoad> m_pendingLoads;
+        std::unordered_map<std::string, std::pair<std::string, std::string>> m_outputOwners;
+        void drainPendingLoads();
+        void defineImports(WasmModule& mod);
+        bool resolveExports(WasmModule& mod);
+        void destroyModule(WasmModule& mod);
+        void destroyWorkers();
+        result_t loadWasm(const std::vector<uint8_t>& wasmBytes, const std::string& scriptFile, const std::string& sourcePath);
+};
+
+struct WasmModule : std::enable_shared_from_this<WasmModule>
+{
+        WasmScriptRuntime* rt = nullptr;
+        std::string scriptFile;
+        wasmtime_store_t* store = nullptr;
+        wasmtime_module_t* module = nullptr;
+        wasmtime_linker_t* linker = nullptr;
+        wasmtime_instance_t instance{ };
+        wasmtime_memory_t memory{ };
+        bool hasMemory = false;
+        wasmtime_func_t fnTick{ };
+        wasmtime_func_t fnEvent{ };
+        wasmtime_func_t fnStop{ };
+        wasmtime_func_t fnAlloc{ };
+        wasmtime_func_t fnFree{ };
+        wasmtime_func_t fnInvokeRef{ };
+        wasmtime_func_t fnDuplicateRef{ };
+        wasmtime_func_t fnRemoveRef{ };
+        wasmtime_func_t fnHasPendingWork{ };
+        wasmtime_func_t fnTickBookmarks{ };
+        bool hasTickFn = false;
+        bool hasEventFn = false;
+        bool hasStopFn = false;
+        bool hasAllocFn = false;
+        bool hasFreeFn = false;
+        bool hasInvokeRefFn = false;
+        bool hasDuplicateRefFn = false;
+        bool hasRemoveRefFn = false;
+        bool hasHasPendingWorkFn = false;
+        bool hasTickBookmarksFn = false;
+        bool hasValidNativeResult = false;
+        fxNativeContext lastNativeCtx{ };
+        uint32_t lastResultPtrMask = 0;
+        int32_t lastSpawnExitCode = 0;
+        std::unordered_map<int32_t, uint64_t> wasmToHostBookmark;
+
+        uint8_t* wasmBase();
+        size_t wasmMemSize();
+        uint32_t wasmAlloc(uint32_t size);
+        void wasmFree(uint32_t ptr, uint32_t size);
+        void refuelWasm();
+        bool call(const wasmtime_func_t& fn, const wasmtime_val_t* args, size_t nargs, wasmtime_val_t* results, size_t nresults, const char* label);
+        bool callVoid(const wasmtime_func_t& fn);
+        bool callEvent(uint32_t namePtr, uint32_t nameLen, uint32_t argsPtr, uint32_t argsLen, uint32_t srcPtr, uint32_t srcLen);
+        void duplicateRef(int32_t callbackId);
+        void removeRef(int32_t callbackId);
 };
 
 }

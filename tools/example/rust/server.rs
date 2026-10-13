@@ -1,10 +1,21 @@
 use cfx::Server;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::collections::HashMap;
 
 fn extract_id(source: &str) -> &str {
         source.split(':').nth(1).unwrap_or(source)
+}
+
+cfx::cfx_worker! {
+        fn count_primes(input: &[u8], result: &mut [u8]) -> i32 {
+                let limit: u32 = std::str::from_utf8(input).ok().and_then(|s| s.parse().ok()).unwrap_or(0);
+                let count = (2..limit).filter(|&n| (2..).take_while(|d| d * d <= n).all(|d| n % d != 0)).count();
+                let out = count.to_string();
+                let len = out.len().min(result.len());
+                result[..len].copy_from_slice(&out.as_bytes()[..len]);
+                len as i32
+        }
 }
 
 Server! {
@@ -62,6 +73,36 @@ Server! {
                 let ping = cfx::native_int("GET_PLAYER_PING", &[cfx::NativeArg::ptr(src.as_ptr() as u64)]);
                 cfx::Value::from(format!("{} (ping={}ms)", name, ping))
         });
+
+        cfx::set_timeout(5000, || {
+                cfx::trace!("[cfx::set_timeout] 5 seconds since start.\n");
+        });
+
+        let minutes = Rc::new(Cell::new(0));
+        cfx::set_interval(60000, move || {
+                minutes.set(minutes.get() + 1);
+                cfx::trace!("[cfx::set_interval] Up for {} minute(s).\n", minutes.get());
+        });
+
+        let worker = cfx::create_worker("count_primes", b"100000");
+        if worker < 0 {
+                cfx::trace!("[cfx::create_worker] Failed to start worker ({}).\n", worker);
+        } else {
+                let poll = Rc::new(Cell::new(0));
+                let poll_id = poll.clone();
+                poll.set(cfx::set_interval(100, move || {
+                        let result = cfx::poll_worker(worker, 64);
+                        if result.is_running() {
+                                return;
+                        }
+                        cfx::clear_interval(poll_id.get());
+                        if result.is_done() {
+                                cfx::trace!("[cfx::create_worker] {} primes below 100000.\n", result.output_str());
+                        } else {
+                                cfx::trace!("[cfx::create_worker] Worker failed ({}).\n", result.status);
+                        }
+                }));
+        }
 
         cfx::on_command("rust", |source, _args| {
                 if source.is_empty() || source == "0" {
