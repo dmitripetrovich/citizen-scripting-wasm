@@ -207,8 +207,11 @@ struct MsgpackWriter
 #include <cstring>
 #include <cstdio>
 #include <chrono>
+#include <cmath>
 #include <coroutine>
+#include <limits>
 #include <memory>
+#include <optional>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
@@ -1489,6 +1492,11 @@ public:
                 return m_arr.at(i).isNull();
         }
 
+        const fxw_internal::Value& value(size_t i) const
+        {
+                return m_arr.at(i);
+        }
+
         std::string funcRef(size_t i) const
         {
                 const auto& v = m_arr.at(i);
@@ -1542,6 +1550,180 @@ template<>
 inline json::Value EventArgs::get<json::Value>(size_t i) const
 {
         return m_arr.at(i);
+}
+
+struct ArgError
+{
+        size_t index = 0;
+        std::string reason;
+};
+
+namespace detail
+{
+
+inline constexpr double MAX_SAFE_INTEGER = 9007199254740991.0;
+
+template<typename T>
+struct IsVector : std::false_type { };
+template<typename T>
+struct IsVector<std::vector<T>> : std::true_type { };
+
+template<typename T>
+struct IsOptional : std::false_type { };
+template<typename T>
+struct IsOptional<std::optional<T>> : std::true_type { };
+
+template<typename>
+inline constexpr bool alwaysFalse = false;
+
+template<typename T>
+bool decodeValue(const json::Value& v, T& out, std::string& reason)
+{
+        using Kind = json::Value::Kind;
+        if constexpr (std::is_same_v<T, bool>)
+        {
+                if (v.kind != Kind::Bool)
+                {
+                        reason = "expected bool";
+                        return false;
+                }
+                out = v.boolVal;
+                return true;
+        }
+        else if constexpr (std::is_integral_v<T>)
+        {
+                if (v.kind != Kind::Number || !std::isfinite(v.numVal) || std::trunc(v.numVal) != v.numVal)
+                {
+                        reason = "expected integer";
+                        return false;
+                }
+                double d = v.numVal;
+                if (d < -MAX_SAFE_INTEGER || d > MAX_SAFE_INTEGER)
+                {
+                        reason = "integer out of safe range";
+                        return false;
+                }
+                if (d < static_cast<double>(std::numeric_limits<T>::min()) || d > static_cast<double>(std::numeric_limits<T>::max()))
+                {
+                        reason = "integer out of range";
+                        return false;
+                }
+                out = static_cast<T>(d);
+                return true;
+        }
+        else if constexpr (std::is_floating_point_v<T>)
+        {
+                if (v.kind != Kind::Number)
+                {
+                        reason = "expected number";
+                        return false;
+                }
+                if (!std::isfinite(v.numVal))
+                {
+                        reason = "number must be finite";
+                        return false;
+                }
+                if (std::abs(v.numVal) > static_cast<double>(std::numeric_limits<T>::max()))
+                {
+                        reason = "number out of range";
+                        return false;
+                }
+                out = static_cast<T>(v.numVal);
+                return true;
+        }
+        else if constexpr (std::is_same_v<T, std::string>)
+        {
+                if (v.kind != Kind::String)
+                {
+                        reason = "expected string";
+                        return false;
+                }
+                out = v.scalar;
+                return true;
+        }
+        else if constexpr (std::is_same_v<T, json::Value>)
+        {
+                out = v;
+                return true;
+        }
+        else if constexpr (IsVector<T>::value)
+        {
+                if (v.kind != Kind::Array)
+                {
+                        reason = "expected array";
+                        return false;
+                }
+                T items;
+                items.reserve(v.children.size());
+                for (size_t i = 0; i < v.children.size(); ++i)
+                {
+                        typename T::value_type item{ };
+                        if (!decodeValue(v.children[i], item, reason))
+                        {
+                                reason = "element " + std::to_string(i) + ": " + reason;
+                                return false;
+                        }
+                        items.push_back(std::move(item));
+                }
+                out = std::move(items);
+                return true;
+        }
+        else if constexpr (IsOptional<T>::value)
+        {
+                if (v.kind == Kind::Null)
+                {
+                        out.reset();
+                        return true;
+                }
+                typename T::value_type inner{ };
+                if (!decodeValue(v, inner, reason))
+                        return false;
+                out = std::move(inner);
+                return true;
+        }
+        else
+                static_assert(alwaysFalse<T>, "unsupported cfx::decodeArgs argument type");
+}
+
+template<typename T, size_t I>
+bool decodeArg(const EventArgs& args, T& out, ArgError& error)
+{
+        if (I >= args.size())
+        {
+                if constexpr (IsOptional<T>::value)
+                {
+                        out.reset();
+                        return true;
+                }
+                error = { I, "missing" };
+                return false;
+        }
+        std::string reason;
+        if (!decodeValue(args.value(I), out, reason))
+        {
+                error = { I, std::move(reason) };
+                return false;
+        }
+        return true;
+}
+
+}
+
+template<typename... Ts>
+bool decodeArgs(const EventArgs& args, std::tuple<Ts...>& out, ArgError& error)
+{
+        for (size_t i = sizeof...(Ts); i < args.size(); ++i)
+        {
+                if (!args.isNull(i))
+                {
+                        error = { i, "unexpected argument" };
+                        return false;
+                }
+        }
+        return [&]<size_t... Is>(std::index_sequence<Is...>)
+        {
+                return (detail::decodeArg<Ts, Is>(args, std::get<Is>(out), error) && ...);
+        }(std::index_sequence_for<Ts...>{ });
 }
 
 using EventHandler = std::function<void(const std::string& source, const EventArgs&)>;

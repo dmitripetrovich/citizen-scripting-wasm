@@ -1335,6 +1335,138 @@ pub fn native_bool(name: &str, args: &[NativeArg]) -> bool {
 pub fn native_string(name: &str, args: &[NativeArg]) -> String {
         invoke_native_string(hash_string(name.as_bytes()), args)
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArgError {
+        pub index: usize,
+        pub reason: String,
+}
+
+pub trait FromArg: Sized {
+        fn from_arg(v: &Value) -> Result<Self, String>;
+        fn from_missing() -> Result<Self, String> { Err("missing".to_string()) }
+}
+
+pub trait FromArgs: Sized {
+        fn from_args(args: &EventArgs) -> Result<Self, ArgError>;
+}
+
+pub fn decode_args<T: FromArgs>(args: &EventArgs) -> Result<T, ArgError> {
+        T::from_args(args)
+}
+
+fn arg_integer(v: &Value) -> Result<i64, String> {
+        match *v {
+                Value::Int(n) => Ok(n),
+                Value::Float(f) if f.is_finite() && f.trunc() == f => {
+                        if f < -9223372036854775808.0 || f >= 9223372036854775808.0 { return Err("integer out of range".to_string()); }
+                        Ok(f as i64)
+                }
+                _ => Err("expected integer".to_string()),
+        }
+}
+
+fn arg_number(v: &Value) -> Result<f64, String> {
+        let f = match *v {
+                Value::Int(n) => n as f64,
+                Value::Float(f) => f,
+                _ => return Err("expected number".to_string()),
+        };
+        if !f.is_finite() { return Err("number must be finite".to_string()); }
+        Ok(f)
+}
+
+impl FromArg for bool {
+        fn from_arg(v: &Value) -> Result<Self, String> {
+                match *v { Value::Bool(b) => Ok(b), _ => Err("expected bool".to_string()) }
+        }
+}
+
+macro_rules! impl_int_from_arg {
+        ($($t:ty),*) => {$(
+                impl FromArg for $t {
+                        fn from_arg(v: &Value) -> Result<Self, String> {
+                                <$t>::try_from(arg_integer(v)?).map_err(|_| "integer out of range".to_string())
+                        }
+                }
+        )*};
+}
+impl_int_from_arg!(i8, i16, i32, i64, u8, u16, u32, u64, isize, usize);
+
+impl FromArg for f64 {
+        fn from_arg(v: &Value) -> Result<Self, String> { arg_number(v) }
+}
+
+impl FromArg for f32 {
+        fn from_arg(v: &Value) -> Result<Self, String> {
+                let f = arg_number(v)?;
+                if f.abs() > f32::MAX as f64 { return Err("number out of range".to_string()); }
+                Ok(f as f32)
+        }
+}
+
+impl FromArg for String {
+        fn from_arg(v: &Value) -> Result<Self, String> {
+                match v { Value::String(s) => Ok(s.clone()), _ => Err("expected string".to_string()) }
+        }
+}
+
+impl FromArg for Value {
+        fn from_arg(v: &Value) -> Result<Self, String> { Ok(v.clone()) }
+}
+
+impl<T: FromArg> FromArg for Option<T> {
+        fn from_arg(v: &Value) -> Result<Self, String> {
+                match v { Value::Null => Ok(None), other => T::from_arg(other).map(Some) }
+        }
+        fn from_missing() -> Result<Self, String> { Ok(None) }
+}
+
+impl<T: FromArg> FromArg for Vec<T> {
+        fn from_arg(v: &Value) -> Result<Self, String> {
+                let items = match v { Value::Array(items) => items, _ => return Err("expected array".to_string()) };
+                items.iter().enumerate().map(|(i, item)| T::from_arg(item).map_err(|e| format!("element {}: {}", i, e))).collect()
+        }
+}
+
+fn decode_arg<T: FromArg>(args: &EventArgs, index: usize) -> Result<T, ArgError> {
+        let result = if index >= args.len() { T::from_missing() } else { T::from_arg(args.value(index)) };
+        result.map_err(|reason| ArgError { index, reason })
+}
+
+fn check_arg_count(args: &EventArgs, count: usize) -> Result<(), ArgError> {
+        for index in count..args.len() {
+                if !args.is_null(index) { return Err(ArgError { index, reason: "unexpected argument".to_string() }); }
+        }
+        Ok(())
+}
+
+impl FromArgs for () {
+        fn from_args(args: &EventArgs) -> Result<Self, ArgError> { check_arg_count(args, 0) }
+}
+
+macro_rules! impl_from_args {
+        ($count:expr; $($t:ident $i:tt),+) => {
+                impl<$($t: FromArg),+> FromArgs for ($($t,)+) {
+                        fn from_args(args: &EventArgs) -> Result<Self, ArgError> {
+                                check_arg_count(args, $count)?;
+                                Ok(($(decode_arg::<$t>(args, $i)?,)+))
+                        }
+                }
+        };
+}
+impl_from_args!(1; A 0);
+impl_from_args!(2; A 0, B 1);
+impl_from_args!(3; A 0, B 1, C 2);
+impl_from_args!(4; A 0, B 1, C 2, D 3);
+impl_from_args!(5; A 0, B 1, C 2, D 3, E 4);
+impl_from_args!(6; A 0, B 1, C 2, D 3, E 4, F 5);
+impl_from_args!(7; A 0, B 1, C 2, D 3, E 4, F 5, G 6);
+impl_from_args!(8; A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7);
+impl_from_args!(9; A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8);
+impl_from_args!(10; A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9);
+impl_from_args!(11; A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9, K 10);
+impl_from_args!(12; A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9, K 10, L 11);
 pub mod runtime {
         use super::*;
 
