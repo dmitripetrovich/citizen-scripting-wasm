@@ -477,6 +477,7 @@ struct Context {
         commands: HashMap<String, Vec<Rc<dyn Fn(&str, &[String])>>>,
         ref_callbacks: HashMap<i32, RefCallbackFn>,
         ref_counts: HashMap<i32, i32>,
+        pending_ref_result: Option<(i32, Vec<u8>)>,
         next_callback_id: i32,
         state_bag_handler_refs: HashMap<i32, i32>,
         export_ref_cache: HashMap<String, String>,
@@ -503,6 +504,7 @@ impl Context {
                         commands: HashMap::new(),
                         ref_callbacks: HashMap::new(),
                         ref_counts: HashMap::new(),
+                        pending_ref_result: None,
                         next_callback_id: 1,
                         state_bag_handler_refs: HashMap::new(),
                         export_ref_cache: HashMap::new(),
@@ -1453,14 +1455,23 @@ pub mod runtime {
 
         pub fn invoke_ref(callback_id: i32, args_ptr: *const u8, args_len: u32, result_ptr: *mut u8, result_max: u32) -> i32 {
                 let c = ctx();
-                let cb = match unsafe { (*c).ref_callbacks.get(&callback_id) } { Some(cb) => cb as *const RefCallbackFn, None => return 0 };
-                let args = unsafe { std::slice::from_raw_parts(args_ptr, args_len as usize) };
-                let result = unsafe { (*cb)(args) };
+                let result = match unsafe { (*c).pending_ref_result.take() } {
+                        Some((id, data)) if id == callback_id && data.len() as u32 <= result_max => data,
+                        _ => {
+                                let cb = match unsafe { (*c).ref_callbacks.get(&callback_id) } { Some(cb) => cb as *const RefCallbackFn, None => return 0 };
+                                let args = unsafe { std::slice::from_raw_parts(args_ptr, args_len as usize) };
+                                unsafe { (*cb)(args) }
+                        }
+                };
                 let copy = (result.len() as u32).min(result_max);
                 if copy > 0 && !result_ptr.is_null() {
                         unsafe { std::ptr::copy_nonoverlapping(result.as_ptr(), result_ptr, copy as usize); }
                 }
-                result.len() as i32
+                let size = result.len() as i32;
+                if result.len() as u32 > result_max {
+                        unsafe { (*c).pending_ref_result = Some((callback_id, result)) };
+                }
+                size
         }
 
         pub fn duplicate_ref(callback_id: i32) -> i32 {

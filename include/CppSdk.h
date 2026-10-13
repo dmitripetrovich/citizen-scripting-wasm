@@ -1744,6 +1744,18 @@ inline std::unordered_map<int32_t, int32_t>& refCounts()
         return s_map;
 }
 
+struct PendingRefResult
+{
+        int32_t callbackId = 0;
+        std::vector<uint8_t> data;
+};
+
+inline PendingRefResult& pendingRefResult()
+{
+        static PendingRefResult s_pending;
+        return s_pending;
+}
+
 inline int32_t& nextCallbackId()
 {
         static int32_t s_id = 1;
@@ -3113,15 +3125,27 @@ void __cfxOnStop()
 CFX_WASM_EXPORT(__cfx_invoke_ref)
 int32_t __cfxInvokeRef(int32_t callback_id, const uint8_t* args_ptr, uint32_t args_len, uint8_t* result_ptr, uint32_t result_max)
 {
-        auto& callbacks = fxw_internal::refCallbacks();
-        auto it = callbacks.find(callback_id);
-        if (it == callbacks.end())
-                return 0;
-        auto result = it->second(args_ptr, args_len);
+        auto& pending = fxw_internal::pendingRefResult();
+        std::vector<uint8_t> result;
+        result.swap(pending.data);
+        if (result.empty() || pending.callbackId != callback_id || result.size() > result_max)
+        {
+                auto& callbacks = fxw_internal::refCallbacks();
+                auto it = callbacks.find(callback_id);
+                if (it == callbacks.end())
+                        return 0;
+                result = it->second(args_ptr, args_len);
+        }
         uint32_t copy = std::min<uint32_t>(static_cast<uint32_t>(result.size()), result_max);
         if (copy > 0 && result_ptr)
                 memcpy(result_ptr, result.data(), copy);
-        return static_cast<int32_t>(result.size());
+        int32_t size = static_cast<int32_t>(result.size());
+        if (result.size() > result_max)
+        {
+                pending.callbackId = callback_id;
+                pending.data = std::move(result);
+        }
+        return size;
 }
 
 CFX_WASM_EXPORT(__cfx_duplicate_ref)
