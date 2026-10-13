@@ -2312,12 +2312,20 @@ static bool compileResource(const std::string& sourcePath, const std::string& wa
         return ok;
 }
 
-static void RunCompileJob(std::shared_ptr<WasmScriptRuntime::CompileJob> job, std::string sourcePath, std::string sdkPath, std::string resourceName, bool rust)
+static void RunCompileJob(std::shared_ptr<WasmScriptRuntime::CompileJob> job, std::shared_ptr<WasmScriptRuntime::CompileJob> prev, std::string sourcePath, std::string sdkPath, std::string resourceName, bool rust)
 {
-        bool ok = compileResource(sourcePath, job->wasmFile, sdkPath, resourceName, rust);
+        if (prev)
+        {
+                while (!prev->done.load(std::memory_order_acquire))
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                prev.reset();
+        }
+        bool ok = !job->cancelled.load(std::memory_order_relaxed) && compileResource(sourcePath, job->wasmFile, sdkPath, resourceName, rust);
         {
                 std::lock_guard<std::mutex> lk(g_compileJobsMutex);
-                g_compileJobs.erase(job->wasmFile);
+                auto it = g_compileJobs.find(job->wasmFile);
+                if (it != g_compileJobs.end() && it->second == job)
+                        g_compileJobs.erase(it);
         }
         job->ok = ok && !job->cancelled.load(std::memory_order_relaxed);
         job->done.store(true, std::memory_order_release);
@@ -2388,17 +2396,21 @@ result_t OM_DECL WasmScriptRuntime::LoadFile(char* scriptFile)
                         {
                                 std::lock_guard<std::mutex> lk(g_compileJobsMutex);
                                 auto& slot = g_compileJobs[wasmFile];
-                                if (slot)
-                                        slot->cancelled.store(true, std::memory_order_relaxed);
+                                std::shared_ptr<CompileJob> prev = slot;
+                                if (prev)
+                                        prev->cancelled.store(true, std::memory_order_relaxed);
                                 slot = std::make_shared<CompileJob>();
                                 slot->wasmFile = wasmFile;
                                 try
                                 {
-                                        std::thread(RunCompileJob, slot, resolvedPath, sdkPath, m_resourceName, file.ends_with(".rs")).detach();
+                                        std::thread(RunCompileJob, slot, prev, resolvedPath, sdkPath, m_resourceName, file.ends_with(".rs")).detach();
                                 }
                                 catch (...)
                                 {
-                                        g_compileJobs.erase(wasmFile);
+                                        if (prev)
+                                                slot = prev;
+                                        else
+                                                g_compileJobs.erase(wasmFile);
                                         LogError("Failed to start compile thread for '%s' in resource '%s'", scriptFile, m_resourceName.c_str());
                                         return FX_E_INVALIDARG;
                                 }
