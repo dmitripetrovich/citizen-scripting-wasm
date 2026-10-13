@@ -391,7 +391,7 @@ impl<'a> MsgpackReader<'a> {
                         0xCC => Value::Int(self.u8() as i64),
                         0xCD => Value::Int(self.u16() as i64),
                         0xCE => Value::Int(self.u32() as i64),
-                        0xCF => Value::Int(self.u64() as i64),
+                        0xCF => { let n = self.u64(); if n > i64::MAX as u64 { Value::Float(n as f64) } else { Value::Int(n as i64) } }
                         0xD0 => Value::Int((self.u8() as i8) as i64),
                         0xD1 => Value::Int((self.u16() as i16) as i64),
                         0xD2 => Value::Int((self.u32() as i32) as i64),
