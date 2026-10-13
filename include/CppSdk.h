@@ -203,6 +203,7 @@ struct MsgpackWriter
 
 #include <algorithm>
 #include <bit>
+#include <charconv>
 #include <cstdlib>
 #include <cstring>
 #include <cstdio>
@@ -239,6 +240,7 @@ struct Value
                 FuncRef
         } kind = Kind::Null;
         bool isIntegral = false;
+        int64_t intVal = 0;
         union
         {
                 double numVal;
@@ -261,7 +263,7 @@ struct Value
         Value() : numVal(0.0) { }
         ~Value() { if (hasString()) scalar.~basic_string(); }
 
-        Value(const Value& o) : kind(o.kind), isIntegral(o.isIntegral), children(o.children), keys(o.keys)
+        Value(const Value& o) : kind(o.kind), isIntegral(o.isIntegral), intVal(o.intVal), children(o.children), keys(o.keys)
         {
                 if (o.hasString()) new (&scalar) std::string(o.scalar);
                 else if (o.kind == Kind::Bool) boolVal = o.boolVal;
@@ -283,6 +285,7 @@ struct Value
                         }
                         kind = o.kind;
                         isIntegral = o.isIntegral;
+                        intVal = o.intVal;
                         children = o.children;
                         keys = o.keys;
                         m_keyIndex.reset();
@@ -290,7 +293,7 @@ struct Value
                 return *this;
         }
 
-        Value(Value&& o) noexcept : kind(o.kind), isIntegral(o.isIntegral), children(std::move(o.children)), keys(std::move(o.keys))
+        Value(Value&& o) noexcept : kind(o.kind), isIntegral(o.isIntegral), intVal(o.intVal), children(std::move(o.children)), keys(std::move(o.keys))
         {
                 if (o.hasString())
                 {
@@ -321,6 +324,7 @@ struct Value
                         else numVal = o.numVal;
                         kind = newKind;
                         isIntegral = newIntegral;
+                        intVal = o.intVal;
                         children = std::move(o.children);
                         keys = std::move(o.keys);
                         m_keyIndex.reset();
@@ -328,8 +332,8 @@ struct Value
                 return *this;
         }
 
-        Value(int v) : kind(Kind::Number), isIntegral(true), numVal(static_cast<double>(v)) { }
-        Value(int64_t v) : kind(Kind::Number), isIntegral(true), numVal(static_cast<double>(v)) { }
+        Value(int v) : kind(Kind::Number), isIntegral(true), intVal(v), numVal(static_cast<double>(v)) { }
+        Value(int64_t v) : kind(Kind::Number), isIntegral(true), intVal(v), numVal(static_cast<double>(v)) { }
         Value(double v) : kind(Kind::Number), numVal(v) { }
         Value(float v) : kind(Kind::Number), numVal(static_cast<double>(v)) { }
         Value(bool b) : kind(Kind::Bool), boolVal(b) { }
@@ -345,6 +349,14 @@ struct Value
                 new (&scalar) std::string(std::move(s));
         }
 
+        void setInt(int64_t v)
+        {
+                kind = Kind::Number;
+                isIntegral = true;
+                intVal = v;
+                numVal = static_cast<double>(v);
+        }
+
         std::string asStr(std::string_view def = "") const
         {
                 return kind == Kind::String ? scalar : std::string(def);
@@ -357,7 +369,9 @@ struct Value
 
         int asInt(int def = 0) const
         {
-                return kind == Kind::Number ? static_cast<int>(numVal) : def;
+                if (kind != Kind::Number)
+                        return def;
+                return isIntegral ? static_cast<int>(intVal) : static_cast<int>(numVal);
         }
 
         float asFloat(float def = 0.f) const
@@ -367,7 +381,9 @@ struct Value
 
         int64_t asInt64(int64_t def = 0) const
         {
-                return kind == Kind::Number ? static_cast<int64_t>(numVal) : def;
+                if (kind != Kind::Number)
+                        return def;
+                return isIntegral ? intVal : static_cast<int64_t>(numVal);
         }
 
         bool asBool(bool def = false) const
@@ -556,16 +572,12 @@ struct Reader
                 Value v;
                 if ((b & 0x80) == 0)
                 {
-                        v.kind = Value::Kind::Number;
-                        v.numVal = b;
-                        v.isIntegral = true;
+                        v.setInt(b);
                         return v;
                 }
                 if ((b & 0xE0) == 0xE0)
                 {
-                        v.kind = Value::Kind::Number;
-                        v.numVal = static_cast<int8_t>(b);
-                        v.isIntegral = true;
+                        v.setInt(static_cast<int8_t>(b));
                         return v;
                 }
                 if ((b & 0xE0) == 0xA0)
@@ -633,47 +645,37 @@ struct Reader
                                 return v;
                         }
                         case 0xCC:
-                                v.kind = Value::Kind::Number;
-                                v.numVal = u8();
-                                v.isIntegral = true;
+                                v.setInt(u8());
                                 return v;
                         case 0xCD:
-                                v.kind = Value::Kind::Number;
-                                v.numVal = u16();
-                                v.isIntegral = true;
+                                v.setInt(u16());
                                 return v;
                         case 0xCE:
-                                v.kind = Value::Kind::Number;
-                                v.numVal = u32();
-                                v.isIntegral = true;
+                                v.setInt(u32());
                                 return v;
                         case 0xCF:
                         {
                                 uint64_t n = u64();
-                                v.kind = Value::Kind::Number;
-                                v.numVal = static_cast<double>(n);
-                                v.isIntegral = n <= static_cast<uint64_t>(INT64_MAX);
+                                if (n <= static_cast<uint64_t>(INT64_MAX))
+                                        v.setInt(static_cast<int64_t>(n));
+                                else
+                                {
+                                        v.kind = Value::Kind::Number;
+                                        v.numVal = static_cast<double>(n);
+                                }
                                 return v;
                         }
                         case 0xD0:
-                                v.kind = Value::Kind::Number;
-                                v.numVal = static_cast<int8_t>(u8());
-                                v.isIntegral = true;
+                                v.setInt(static_cast<int8_t>(u8()));
                                 return v;
                         case 0xD1:
-                                v.kind = Value::Kind::Number;
-                                v.numVal = static_cast<int16_t>(u16());
-                                v.isIntegral = true;
+                                v.setInt(static_cast<int16_t>(u16()));
                                 return v;
                         case 0xD2:
-                                v.kind = Value::Kind::Number;
-                                v.numVal = static_cast<int32_t>(u32());
-                                v.isIntegral = true;
+                                v.setInt(static_cast<int32_t>(u32()));
                                 return v;
                         case 0xD3:
-                                v.kind = Value::Kind::Number;
-                                v.numVal = static_cast<double>(static_cast<int64_t>(u64()));
-                                v.isIntegral = true;
+                                v.setInt(static_cast<int64_t>(u64()));
                                 return v;
                         case 0xCA:
                                 v.kind = Value::Kind::Number;
@@ -765,7 +767,7 @@ struct Writer : cfx::MsgpackWriter
                                 break;
                         case Value::Kind::Number:
                                 if (v.isIntegral)
-                                        encInt(static_cast<int64_t>(v.numVal));
+                                        encInt(v.intVal);
                                 else
                                         encDouble(v.numVal);
                                 break;
@@ -1318,8 +1320,17 @@ namespace detail
                                         return { };
                                 }
                                 std::string numStr(src.data() + start, pos - start);
+                                if (!hasDot && !hasExp)
+                                {
+                                        int64_t n = 0;
+                                        auto [ptr, ec] = std::from_chars(numStr.data(), numStr.data() + numStr.size(), n);
+                                        if (ec == std::errc{ } && ptr == numStr.data() + numStr.size())
+                                        {
+                                                v.setInt(n);
+                                                return v;
+                                        }
+                                }
                                 v.numVal = std::strtod(numStr.c_str(), nullptr);
-                                v.isIntegral = !hasDot && !hasExp;
                         }
                         return v;
                 }
@@ -1352,9 +1363,11 @@ inline void stringifyTo(std::string& out, const Value& v)
                         if (v.isIntegral)
                         {
                                 char buf[32];
-                                snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(static_cast<int64_t>(v.numVal)));
+                                snprintf(buf, sizeof(buf), "%lld", static_cast<long long>(v.intVal));
                                 out += buf;
                         }
+                        else if (!std::isfinite(v.numVal))
+                                out += "null";
                         else
                         {
                                 char buf[64];
@@ -1564,8 +1577,6 @@ struct ArgError
 namespace detail
 {
 
-inline constexpr double MAX_SAFE_INTEGER = 9007199254740991.0;
-
 template<typename T>
 struct IsVector : std::false_type { };
 template<typename T>
@@ -1595,23 +1606,34 @@ bool decodeValue(const json::Value& v, T& out, std::string& reason)
         }
         else if constexpr (std::is_integral_v<T>)
         {
-                if (v.kind != Kind::Number || !std::isfinite(v.numVal) || std::trunc(v.numVal) != v.numVal)
+                int64_t n = 0;
+                if (v.kind == Kind::Number && v.isIntegral)
+                        n = v.intVal;
+                else if (v.kind == Kind::Number && std::isfinite(v.numVal) && std::trunc(v.numVal) == v.numVal)
+                {
+                        if (v.numVal < -9223372036854775808.0 || v.numVal >= 9223372036854775808.0)
+                        {
+                                reason = "integer out of range";
+                                return false;
+                        }
+                        n = static_cast<int64_t>(v.numVal);
+                }
+                else
                 {
                         reason = "expected integer";
                         return false;
                 }
-                double d = v.numVal;
-                if (d < -MAX_SAFE_INTEGER || d > MAX_SAFE_INTEGER)
-                {
-                        reason = "integer out of safe range";
-                        return false;
-                }
-                if (d < static_cast<double>(std::numeric_limits<T>::min()) || d > static_cast<double>(std::numeric_limits<T>::max()))
+                bool inRange;
+                if constexpr (std::is_signed_v<T>)
+                        inRange = n >= static_cast<int64_t>(std::numeric_limits<T>::min()) && n <= static_cast<int64_t>(std::numeric_limits<T>::max());
+                else
+                        inRange = n >= 0 && static_cast<uint64_t>(n) <= static_cast<uint64_t>(std::numeric_limits<T>::max());
+                if (!inRange)
                 {
                         reason = "integer out of range";
                         return false;
                 }
-                out = static_cast<T>(d);
+                out = static_cast<T>(n);
                 return true;
         }
         else if constexpr (std::is_floating_point_v<T>)
@@ -1774,6 +1796,12 @@ struct TimerEntry
         std::function<void()> callback;
 };
 
+inline void traceMessage(const std::string& msg)
+{
+        if (!msg.empty())
+                __cfxTrace(msg.data(), static_cast<uint32_t>(msg.size()));
+}
+
 template<typename F>
 inline void safeInvoke(F&& fn, const char* resourceName, const char* context)
 {
@@ -1833,7 +1861,7 @@ struct Context
         {
                 if (timers.size() >= MAX_TIMERS)
                 {
-                        fprintf(stderr, "[script:%s] timer limit (%zu) reached, dropping new timer\n", resourceName.c_str(), MAX_TIMERS);
+                        traceMessage("timer limit (" + std::to_string(MAX_TIMERS) + ") reached, dropping new timer\n");
                         return -1;
                 }
                 int32_t id = cfx::allocateId(nextTimerId, timers);
@@ -2441,14 +2469,16 @@ inline void traceLn(const char* fmt, TArgs&&... args)
                         return;
                 if (static_cast<size_t>(len) + 1 < sizeof(stackBuf))
                 {
-                        stackBuf[len] = '\n';
-                        __cfxTrace(stackBuf, static_cast<uint32_t>(len + 1));
+                        if (len == 0 || stackBuf[len - 1] != '\n')
+                                stackBuf[len++] = '\n';
+                        __cfxTrace(stackBuf, static_cast<uint32_t>(len));
                         return;
                 }
                 std::string buf(static_cast<size_t>(len) + 1, '\0');
                 snprintf(buf.data(), buf.size(), fmt, std::forward<TArgs>(args)...);
-                buf[len] = '\n';
-                __cfxTrace(buf.data(), static_cast<uint32_t>(buf.size()));
+                if (buf[len - 1] != '\n')
+                        buf[len++] = '\n';
+                __cfxTrace(buf.data(), static_cast<uint32_t>(len));
         }
 }
 #pragma clang diagnostic pop
@@ -3158,7 +3188,7 @@ namespace detail
                 auto& coros = fxw_internal::coroutines();
                 if (coros.size() >= fxw_internal::MAX_COROUTINES)
                 {
-                        fprintf(stderr, "[script:%s] coroutine limit (%zu) reached, dropping new thread\n", c->resourceName.c_str(), fxw_internal::MAX_COROUTINES);
+                        fxw_internal::traceMessage("coroutine limit (" + std::to_string(fxw_internal::MAX_COROUTINES) + ") reached, dropping new thread\n");
                         return;
                 }
                 auto stored = std::make_shared<std::decay_t<F>>(std::forward<F>(fn));
@@ -3167,7 +3197,7 @@ namespace detail
                 int32_t id = cfx::allocateId(nextId, coros);
                 if (id < 0)
                 {
-                        fprintf(stderr, "[script:%s] no free coroutine id, dropping new thread\n", c->resourceName.c_str());
+                        fxw_internal::traceMessage("no free coroutine id, dropping new thread\n");
                         return;
                 }
                 coros[id] = { task.handle, std::move(stored), std::chrono::steady_clock::now() };
@@ -3233,6 +3263,26 @@ struct WorkerResult
 {
         int32_t status;
         std::string output;
+
+        bool isRunning() const
+        {
+                return status == -3;
+        }
+
+        bool isError() const
+        {
+                return status == -1;
+        }
+
+        bool isInvalid() const
+        {
+                return status == -2;
+        }
+
+        bool isDone() const
+        {
+                return status >= 0;
+        }
 };
 
 inline int32_t createWorker(const std::string& fnName, const std::string& input = "")

@@ -160,7 +160,7 @@ impl Default for Value {
 
 impl Value {
         pub fn as_str(&self) -> &str {
-                match self { Value::String(s) | Value::FuncRef(s) => s, _ => "" }
+                match self { Value::String(s) => s, _ => "" }
         }
         pub fn as_int(&self) -> i32 {
                 match self { Value::Int(n) => *n as i32, Value::Float(n) => *n as i32, _ => 0 }
@@ -194,14 +194,24 @@ impl Value {
                         _ => &NULL_VALUE,
                 }
         }
+        pub fn has(&self, key: &str) -> bool {
+                match self { Value::Object(entries) => entries.iter().any(|(k, _)| k == key), _ => false }
+        }
         pub fn is_func_ref(&self) -> bool { matches!(self, Value::FuncRef(_)) }
         pub fn func_ref_str(&self) -> &str {
                 match self { Value::FuncRef(s) => s, _ => "" }
         }
 }
 
+impl From<i8> for Value { fn from(v: i8) -> Self { Value::Int(v as i64) } }
+impl From<i16> for Value { fn from(v: i16) -> Self { Value::Int(v as i64) } }
 impl From<i32> for Value { fn from(v: i32) -> Self { Value::Int(v as i64) } }
 impl From<i64> for Value { fn from(v: i64) -> Self { Value::Int(v) } }
+impl From<u8> for Value { fn from(v: u8) -> Self { Value::Int(v as i64) } }
+impl From<u16> for Value { fn from(v: u16) -> Self { Value::Int(v as i64) } }
+impl From<u32> for Value { fn from(v: u32) -> Self { Value::Int(v as i64) } }
+impl From<u64> for Value { fn from(v: u64) -> Self { if v > i64::MAX as u64 { Value::Float(v as f64) } else { Value::Int(v as i64) } } }
+impl From<Vec<Value>> for Value { fn from(v: Vec<Value>) -> Self { Value::Array(v) } }
 impl From<f64> for Value { fn from(v: f64) -> Self { Value::Float(v) } }
 impl From<f32> for Value { fn from(v: f32) -> Self { Value::Float(v as f64) } }
 impl From<bool> for Value { fn from(v: bool) -> Self { Value::Bool(v) } }
@@ -441,8 +451,55 @@ impl EventArgs {
         pub fn bool(&self, i: usize) -> bool { self.inner.at(i).as_bool() }
         pub fn is_null(&self, i: usize) -> bool { self.inner.at(i).is_null() }
         pub fn func_ref(&self, i: usize) -> &str { self.inner.at(i).func_ref_str() }
+        pub fn get<T: FromEventArg>(&self, i: usize) -> T { T::from_event_arg(self, i) }
 }
+
+pub trait FromEventArg: Sized {
+        fn from_event_arg(args: &EventArgs, i: usize) -> Self;
+}
+
+impl FromEventArg for String { fn from_event_arg(args: &EventArgs, i: usize) -> Self { args.str(i).to_string() } }
+impl FromEventArg for i32 { fn from_event_arg(args: &EventArgs, i: usize) -> Self { args.int(i) } }
+impl FromEventArg for i64 { fn from_event_arg(args: &EventArgs, i: usize) -> Self { args.i64(i) } }
+impl FromEventArg for f64 { fn from_event_arg(args: &EventArgs, i: usize) -> Self { args.f64(i) } }
+impl FromEventArg for f32 { fn from_event_arg(args: &EventArgs, i: usize) -> Self { args.f32(i) } }
+impl FromEventArg for bool { fn from_event_arg(args: &EventArgs, i: usize) -> Self { args.bool(i) } }
+impl FromEventArg for Value { fn from_event_arg(args: &EventArgs, i: usize) -> Self { args.value(i).clone() } }
+
 type EventHandlerFn = Rc<dyn Fn(&str, &EventArgs)>;
+
+pub struct RawEventHandler;
+
+pub trait IntoEventHandler<M> {
+        fn into_event_handler(self) -> EventHandlerFn;
+}
+
+impl<F: Fn(&str, &EventArgs) + 'static> IntoEventHandler<RawEventHandler> for F {
+        fn into_event_handler(self) -> EventHandlerFn { Rc::new(self) }
+}
+
+macro_rules! impl_typed_event_handler {
+        ($($t:ident $i:tt),*) => {
+                impl<F, $($t: FromEventArg),*> IntoEventHandler<($($t,)*)> for F where F: Fn(&str $(, $t)*) + 'static {
+                        fn into_event_handler(self) -> EventHandlerFn {
+                                Rc::new(move |source: &str, _args: &EventArgs| self(source $(, _args.get::<$t>($i))*))
+                        }
+                }
+        };
+}
+impl_typed_event_handler!();
+impl_typed_event_handler!(A 0);
+impl_typed_event_handler!(A 0, B 1);
+impl_typed_event_handler!(A 0, B 1, C 2);
+impl_typed_event_handler!(A 0, B 1, C 2, D 3);
+impl_typed_event_handler!(A 0, B 1, C 2, D 3, E 4);
+impl_typed_event_handler!(A 0, B 1, C 2, D 3, E 4, F5 5);
+impl_typed_event_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6);
+impl_typed_event_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6, H 7);
+impl_typed_event_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6, H 7, I 8);
+impl_typed_event_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6, H 7, I 8, J 9);
+impl_typed_event_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6, H 7, I 8, J 9, K 10);
+impl_typed_event_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6, H 7, I 8, J 9, K 10, L 11);
 type RefCallbackFn = Box<dyn Fn(&[u8]) -> Vec<u8>>;
 
 struct EventHandlerEntry {
@@ -523,7 +580,10 @@ impl Context {
         }
 
         fn add_timer(&mut self, ms: u32, interval_ms: u32, cb: Rc<dyn Fn()>) -> i32 {
-                if self.timers.len() >= 8192 { return -1; }
+                if self.timers.len() >= 8192 {
+                        trace_str("timer limit (8192) reached, dropping new timer\n");
+                        return -1;
+                }
                 let id = allocate_id(&mut self.next_timer_id, &self.timers);
                 if id < 0 { return -1; }
                 let fire = self.now_ms() + ms as u64;
@@ -655,7 +715,7 @@ pub fn invoke_native_vector3(hash: u64, args: &[NativeArg]) -> Vector3 {
         }
 }
 
-fn get_string_result(ctx: &NativeCtx, result_idx: i32) -> String {
+pub fn get_string_result(ctx: &NativeCtx, result_idx: i32) -> String {
         unsafe {
                 let len = __cfx_copy_string_result(ctx as *const NativeCtx as u32, result_idx, std::ptr::null_mut(), 0);
                 if len <= 0 { return String::new(); }
@@ -666,7 +726,7 @@ fn get_string_result(ctx: &NativeCtx, result_idx: i32) -> String {
         }
 }
 
-fn get_binary_result(ctx: &NativeCtx, ptr_idx: i32, size_idx: i32) -> Vec<u8> {
+pub fn get_binary_result(ctx: &NativeCtx, ptr_idx: i32, size_idx: i32) -> Vec<u8> {
         unsafe {
                 let len = __cfx_copy_binary_result(ctx as *const NativeCtx as u32, ptr_idx, size_idx, std::ptr::null_mut(), 0);
                 if len <= 0 { return Vec::new(); }
@@ -681,17 +741,17 @@ pub fn trace_str(msg: &str) {
         }
 }
 
-pub fn on(event: &str, handler: impl Fn(&str, &EventArgs) + 'static) -> i32 {
+pub fn on<M>(event: &str, handler: impl IntoEventHandler<M>) -> i32 {
         let c = ctx();
-        let is_new = unsafe { !(*c).events.contains_key(event) };
+        let first = unsafe { (*c).events.get(event).map_or(true, |v| v.is_empty()) };
         let token = unsafe { allocate_id(&mut (*c).next_event_handler_id, &(*c).handler_event_map) };
         if token < 0 { return -1; }
         unsafe { (*c).events.entry(event.to_string()).or_default() }.push(EventHandlerEntry {
                 id: token,
-                handler: Rc::new(handler),
+                handler: handler.into_event_handler(),
         });
         unsafe { (*c).handler_event_map.insert(token, event.to_string()) };
-        if is_new {
+        if first {
                 let mut nctx = NativeCtx::new(hash_string(b"REGISTER_RESOURCE_AS_EVENT_HANDLER"));
                 nctx.num_args = 1;
                 let cs = CString::new(event).unwrap_or_default();
@@ -702,7 +762,7 @@ pub fn on(event: &str, handler: impl Fn(&str, &EventArgs) + 'static) -> i32 {
         token
 }
 
-pub fn on_net(event: &str, handler: impl Fn(&str, &EventArgs) + 'static) -> i32 {
+pub fn on_net<M>(event: &str, handler: impl IntoEventHandler<M>) -> i32 {
         unsafe { (*ctx()).net_safe_events.insert(event.to_string()) };
         on(event, handler)
 }
@@ -731,6 +791,13 @@ pub fn emit_net(event: &str, target: i32, args: &[Value]) {
         unsafe {
                 __cfx_emit_net_event(event.as_ptr(), event.len() as u32, target, buf.as_ptr(), buf.len() as u32);
         }
+}
+
+pub fn emit_latent(event: &str, target: i32, bps: i32, args: &[Value]) {
+        let buf = encode_args(args);
+        let event_cs = CString::new(event).unwrap_or_default();
+        let target_cs = CString::new(target.to_string()).unwrap_or_default();
+        invoke_native_void(hash_string(b"TRIGGER_LATENT_CLIENT_EVENT_INTERNAL"), &[NativeArg::ptr(event_cs.as_ptr() as u64), NativeArg::ptr(target_cs.as_ptr() as u64), NativeArg::ptr(buf.as_ptr() as u64), NativeArg::val(buf.len() as u32 as u64), NativeArg::val(bps as u32 as u64)]);
 }
 
 pub fn cancel_event() {
@@ -776,6 +843,9 @@ pub fn set_interval(ms: u32, cb: impl Fn() + 'static) -> i32 {
 pub fn clear_timer(id: i32) {
         unsafe { (*ctx()).timers.remove(&id) };
 }
+
+pub fn clear_timeout(id: i32) { clear_timer(id); }
+pub fn clear_interval(id: i32) { clear_timer(id); }
 
 pub fn get_resource_metadata(key: &str, index: i32) -> String {
         unsafe {
@@ -865,13 +935,13 @@ pub fn get_resources() -> Vec<String> {
 }
 
 pub fn on_resource_start(handler: impl Fn(&str) + 'static) -> i32 {
-        on("onResourceStart", move |_source, args| {
+        on("onResourceStart", move |_source: &str, args: &EventArgs| {
                 if args.len() > 0 { handler(args.str(0)); }
         })
 }
 
 pub fn on_resource_stop(handler: impl Fn(&str) + 'static) -> i32 {
-        on("onResourceStop", move |_source, args| {
+        on("onResourceStop", move |_source: &str, args: &EventArgs| {
                 if args.len() > 0 { handler(args.str(0)); }
         })
 }
@@ -892,7 +962,7 @@ pub fn add_export(name: &str, handler: impl Fn(&EventArgs) -> Value + 'static) {
         let res_name = get_current_resource_name();
         let event_name = format!("__cfx_export_{}_{}", res_name, name);
         let export_ref_clone = export_ref.clone();
-        on(&event_name, move |_source, args| {
+        on(&event_name, move |_source: &str, args: &EventArgs| {
                 if args.len() == 0 { return; }
                 let setter_ref = args.func_ref(0);
                 if setter_ref.is_empty() { return; }
@@ -1157,6 +1227,20 @@ pub fn flush_kvp() {
         invoke_native_void(hash_string(b"FLUSH_RESOURCE_KVP"), &[]);
 }
 
+pub fn find_kvp(prefix: &str) -> Vec<String> {
+        let mut keys = Vec::new();
+        let p = CString::new(prefix).unwrap_or_default();
+        let handle = invoke_native_int(hash_string(b"START_FIND_KVP"), &[NativeArg::ptr(p.as_ptr() as u64)]);
+        if handle == -1 { return keys; }
+        loop {
+                let key = invoke_native_string(hash_string(b"FIND_KVP"), &[NativeArg::val(handle as u32 as u64)]);
+                if key.is_empty() { break; }
+                keys.push(key);
+        }
+        invoke_native_void(hash_string(b"END_FIND_KVP"), &[NativeArg::val(handle as u32 as u64)]);
+        keys
+}
+
 pub struct ProcessResult {
         pub status: i32,
         pub exit_code: i32,
@@ -1249,12 +1333,12 @@ pub fn create_thread(f: impl Future<Output = ()> + 'static) {
 fn create_coroutine_impl(f: impl Future<Output = ()> + 'static, resume_now: bool) {
         let c = ctx();
         if unsafe { (*c).coroutines.len() } >= 4096 {
-                trace_str(&format!("[script:{}] coroutine limit (4096) reached\n", unsafe { &(*c).resource_name }));
+                trace_str("coroutine limit (4096) reached, dropping new thread\n");
                 return;
         }
         let id = unsafe { allocate_id(&mut (*c).next_coroutine_id, &(*c).coroutines) };
         if id < 0 {
-                trace_str(&format!("[script:{}] no free coroutine id\n", unsafe { &(*c).resource_name }));
+                trace_str("no free coroutine id, dropping new thread\n");
                 return;
         }
         let now = unsafe { (*c).now_ms() };
@@ -1266,16 +1350,16 @@ fn create_coroutine_impl(f: impl Future<Output = ()> + 'static, resume_now: bool
         }
 }
 
-pub fn perform_http_request(url: &str, method: &str, data: &str, headers: &[(&str, &str)], callback: impl FnOnce(i32, String, String) + 'static) {
+pub fn perform_http_request(url: &str, method: &str, data: &str, headers: &[(&str, &str)], follow_location: bool, callback: impl FnOnce(i32, String, String) + 'static) {
         let mut headers_json = "{}".to_string();
         if !headers.is_empty() {
                 let mut parts = Vec::new();
                 for (k, v) in headers {
-                        parts.push(format!("{}:{}", json_quote(k), json_quote(v)));
+                        parts.push(format!("{}:{}", json::quote(k), json::quote(v)));
                 }
                 headers_json = format!("{{{}}}", parts.join(","));
         }
-        let payload = format!(r#"{{"url":{},"method":{},"data":{},"headers":{},"followLocation":true}}"#, json_quote(url), json_quote(method), json_quote(data), headers_json);
+        let payload = format!(r#"{{"url":{},"method":{},"data":{},"headers":{},"followLocation":{}}}"#, json::quote(url), json::quote(method), json::quote(data), headers_json, follow_location);
         let payload_cs = CString::new(payload.as_str()).unwrap_or_default();
         let r = invoke_native_raw(hash_string(b"PERFORM_HTTP_REQUEST_INTERNAL"), &[NativeArg::ptr(payload_cs.as_ptr() as u64), NativeArg::val(payload.len() as u64)], 1, 0);
         let token = r.args[0] as i32;
@@ -1284,7 +1368,7 @@ pub fn perform_http_request(url: &str, method: &str, data: &str, headers: &[(&st
         unsafe { (*c).http_callbacks.insert(token, Box::new(callback)) };
         if !unsafe { (*c).http_response_registered } {
                 unsafe { (*c).http_response_registered = true };
-                on("__cfx_internal:httpResponse", |_source, args| {
+                on("__cfx_internal:httpResponse", |_source: &str, args: &EventArgs| {
                         if args.len() < 4 { return; }
                         let tok = args.int(0);
                         let c = ctx();
@@ -1298,22 +1382,259 @@ pub fn perform_http_request(url: &str, method: &str, data: &str, headers: &[(&st
         }
 }
 
-fn json_quote(s: &str) -> String {
-        let mut out = String::with_capacity(s.len() + 2);
-        out.push('"');
-        for c in s.chars() {
-                match c {
-                        '"' => out.push_str("\\\""),
-                        '\\' => out.push_str("\\\\"),
-                        '\n' => out.push_str("\\n"),
-                        '\r' => out.push_str("\\r"),
-                        '\t' => out.push_str("\\t"),
-                        c if (c as u32) < 0x20 => { out.push_str(&format!("\\u{:04x}", c as u32)); }
-                        c => out.push(c),
+pub mod json {
+        use super::Value;
+
+        pub fn quote(s: &str) -> String {
+                let mut out = String::with_capacity(s.len() + 2);
+                out.push('"');
+                for c in s.chars() {
+                        match c {
+                                '"' => out.push_str("\\\""),
+                                '\\' => out.push_str("\\\\"),
+                                '\n' => out.push_str("\\n"),
+                                '\r' => out.push_str("\\r"),
+                                '\t' => out.push_str("\\t"),
+                                c if (c as u32) < 0x20 => { out.push_str(&format!("\\u{:04x}", c as u32)); }
+                                c => out.push(c),
+                        }
+                }
+                out.push('"');
+                out
+        }
+
+        const MAX_DEPTH: i32 = 128;
+
+        struct Parser<'a> {
+                src: &'a [u8],
+                pos: usize,
+                error: bool,
+        }
+
+        impl<'a> Parser<'a> {
+                fn peek(&self) -> u8 { if self.pos < self.src.len() { self.src[self.pos] } else { 0 } }
+
+                fn consume(&mut self) -> u8 {
+                        if self.pos < self.src.len() { self.pos += 1; self.src[self.pos - 1] } else { 0 }
+                }
+
+                fn skip_ws(&mut self) {
+                        while self.pos < self.src.len() && matches!(self.src[self.pos], b' ' | b'\t' | b'\n' | b'\r') { self.pos += 1; }
+                }
+
+                fn expect(&mut self, c: u8) -> bool {
+                        self.skip_ws();
+                        if self.consume() != c { self.error = true; return false; }
+                        true
+                }
+
+                fn parse_hex4(&mut self) -> u32 {
+                        let mut val = 0u32;
+                        for _ in 0..4 {
+                                let h = self.consume();
+                                val <<= 4;
+                                match h {
+                                        b'0'..=b'9' => val |= (h - b'0') as u32,
+                                        b'a'..=b'f' => val |= (h - b'a' + 10) as u32,
+                                        b'A'..=b'F' => val |= (h - b'A' + 10) as u32,
+                                        _ => self.error = true,
+                                }
+                        }
+                        val
+                }
+
+                fn parse_string(&mut self) -> String {
+                        if !self.expect(b'"') { return String::new(); }
+                        let mut out: Vec<u8> = Vec::new();
+                        while self.pos < self.src.len() {
+                                let c = self.consume();
+                                if c == b'"' { return String::from_utf8_lossy(&out).into_owned(); }
+                                if c != b'\\' { out.push(c); continue; }
+                                let e = self.consume();
+                                match e {
+                                        b'"' => out.push(b'"'),
+                                        b'\\' => out.push(b'\\'),
+                                        b'/' => out.push(b'/'),
+                                        b'b' => out.push(0x08),
+                                        b'f' => out.push(0x0C),
+                                        b'n' => out.push(b'\n'),
+                                        b'r' => out.push(b'\r'),
+                                        b't' => out.push(b'\t'),
+                                        b'u' => {
+                                                let mut cp = self.parse_hex4();
+                                                if (0xD800..=0xDBFF).contains(&cp) {
+                                                        if self.pos + 6 <= self.src.len() && self.src[self.pos] == b'\\' && self.src[self.pos + 1] == b'u' {
+                                                                self.pos += 2;
+                                                                let lo = self.parse_hex4();
+                                                                cp = if (0xDC00..=0xDFFF).contains(&lo) { 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00) } else { 0xFFFD };
+                                                        } else {
+                                                                cp = 0xFFFD;
+                                                        }
+                                                } else if (0xDC00..=0xDFFF).contains(&cp) {
+                                                        cp = 0xFFFD;
+                                                }
+                                                let ch = char::from_u32(cp).unwrap_or('\u{FFFD}');
+                                                let mut buf = [0u8; 4];
+                                                out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+                                        }
+                                        other => out.push(other),
+                                }
+                        }
+                        self.error = true;
+                        String::from_utf8_lossy(&out).into_owned()
+                }
+
+                fn literal(&mut self, word: &[u8], value: Value) -> Value {
+                        if self.src.len() - self.pos < word.len() || &self.src[self.pos..self.pos + word.len()] != word {
+                                self.error = true;
+                                return Value::Null;
+                        }
+                        self.pos += word.len();
+                        value
+                }
+
+                fn digits(&mut self) -> usize {
+                        let start = self.pos;
+                        while self.pos < self.src.len() && self.src[self.pos].is_ascii_digit() { self.pos += 1; }
+                        self.pos - start
+                }
+
+                fn parse_number(&mut self) -> Value {
+                        let start = self.pos;
+                        if self.peek() == b'-' { self.pos += 1; }
+                        let digit_start = self.pos;
+                        let int_digits = self.digits();
+                        if int_digits == 0 || (self.src[digit_start] == b'0' && int_digits > 1) { self.error = true; return Value::Null; }
+                        let mut integral = true;
+                        if self.peek() == b'.' {
+                                integral = false;
+                                self.pos += 1;
+                                if self.digits() == 0 { self.error = true; return Value::Null; }
+                        }
+                        if matches!(self.peek(), b'e' | b'E') {
+                                integral = false;
+                                self.pos += 1;
+                                if matches!(self.peek(), b'+' | b'-') { self.pos += 1; }
+                                if self.digits() == 0 { self.error = true; return Value::Null; }
+                        }
+                        let text = std::str::from_utf8(&self.src[start..self.pos]).unwrap_or("0");
+                        if integral {
+                                if let Ok(n) = text.parse::<i64>() { return Value::Int(n); }
+                        }
+                        Value::Float(text.parse::<f64>().unwrap_or(0.0))
+                }
+
+                fn parse_value(&mut self, depth: i32) -> Value {
+                        if self.error { return Value::Null; }
+                        if depth > MAX_DEPTH { self.error = true; return Value::Null; }
+                        self.skip_ws();
+                        match self.peek() {
+                                b'"' => Value::String(self.parse_string()),
+                                b'{' => {
+                                        self.consume();
+                                        let mut entries = Vec::new();
+                                        self.skip_ws();
+                                        if self.peek() == b'}' { self.consume(); return Value::Object(entries); }
+                                        while !self.error {
+                                                self.skip_ws();
+                                                let key = self.parse_string();
+                                                if self.error { break; }
+                                                if !self.expect(b':') { break; }
+                                                let val = self.parse_value(depth + 1);
+                                                entries.push((key, val));
+                                                if self.error { break; }
+                                                self.skip_ws();
+                                                match self.peek() {
+                                                        b',' => { self.consume(); }
+                                                        b'}' => { self.consume(); break; }
+                                                        _ => { self.error = true; break; }
+                                                }
+                                        }
+                                        Value::Object(entries)
+                                }
+                                b'[' => {
+                                        self.consume();
+                                        let mut items = Vec::new();
+                                        self.skip_ws();
+                                        if self.peek() == b']' { self.consume(); return Value::Array(items); }
+                                        while !self.error {
+                                                items.push(self.parse_value(depth + 1));
+                                                if self.error { break; }
+                                                self.skip_ws();
+                                                match self.peek() {
+                                                        b',' => { self.consume(); }
+                                                        b']' => { self.consume(); break; }
+                                                        _ => { self.error = true; break; }
+                                                }
+                                        }
+                                        Value::Array(items)
+                                }
+                                b't' => self.literal(b"true", Value::Bool(true)),
+                                b'f' => self.literal(b"false", Value::Bool(false)),
+                                b'n' => self.literal(b"null", Value::Null),
+                                _ => self.parse_number(),
+                        }
                 }
         }
-        out.push('"');
-        out
+
+        pub fn parse(json: &str) -> Value {
+                let mut p = Parser { src: json.as_bytes(), pos: 0, error: false };
+                let v = p.parse_value(0);
+                if !p.error { p.skip_ws(); }
+                if p.error || p.pos != p.src.len() { return Value::Null; }
+                v
+        }
+
+        fn trim_fraction(s: &str) -> &str {
+                if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.') } else { s }
+        }
+
+        fn format_number(f: f64) -> String {
+                if !f.is_finite() { return "null".to_string(); }
+                if f == 0.0 { return if f.is_sign_negative() { "-0".to_string() } else { "0".to_string() }; }
+                let sci = format!("{:.16e}", f);
+                let (mantissa, exp) = sci.split_once('e').unwrap_or((&sci, "0"));
+                let exp: i32 = exp.parse().unwrap_or(0);
+                if exp < -4 || exp >= 17 {
+                        format!("{}e{}{:02}", trim_fraction(mantissa), if exp < 0 { '-' } else { '+' }, exp.abs())
+                } else {
+                        trim_fraction(&format!("{:.*}", (16 - exp) as usize, f)).to_string()
+                }
+        }
+
+        pub fn stringify_to(out: &mut String, v: &Value) {
+                match v {
+                        Value::Null | Value::Binary(_) => out.push_str("null"),
+                        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+                        Value::Int(n) => out.push_str(&n.to_string()),
+                        Value::Float(f) => out.push_str(&format_number(*f)),
+                        Value::String(s) | Value::FuncRef(s) => out.push_str(&quote(s)),
+                        Value::Array(items) => {
+                                out.push('[');
+                                for (i, item) in items.iter().enumerate() {
+                                        if i > 0 { out.push(','); }
+                                        stringify_to(out, item);
+                                }
+                                out.push(']');
+                        }
+                        Value::Object(entries) => {
+                                out.push('{');
+                                for (i, (k, item)) in entries.iter().enumerate() {
+                                        if i > 0 { out.push(','); }
+                                        out.push_str(&quote(k));
+                                        out.push(':');
+                                        stringify_to(out, item);
+                                }
+                                out.push('}');
+                        }
+                }
+        }
+
+        pub fn stringify(v: &Value) -> String {
+                let mut out = String::new();
+                stringify_to(&mut out, v);
+                out
+        }
 }
 
 pub fn native_void(name: &str, args: &[NativeArg]) {
@@ -1322,6 +1643,10 @@ pub fn native_void(name: &str, args: &[NativeArg]) {
 
 pub fn native_int(name: &str, args: &[NativeArg]) -> i32 {
         invoke_native_int(hash_string(name.as_bytes()), args)
+}
+
+pub fn native_i64(name: &str, args: &[NativeArg]) -> i64 {
+        invoke_native_i64(hash_string(name.as_bytes()), args)
 }
 
 pub fn native_float(name: &str, args: &[NativeArg]) -> f32 {
@@ -1334,6 +1659,10 @@ pub fn native_bool(name: &str, args: &[NativeArg]) -> bool {
 
 pub fn native_string(name: &str, args: &[NativeArg]) -> String {
         invoke_native_string(hash_string(name.as_bytes()), args)
+}
+
+pub fn native_vector3(name: &str, args: &[NativeArg]) -> Vector3 {
+        invoke_native_vector3(hash_string(name.as_bytes()), args)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1483,7 +1812,7 @@ pub mod runtime {
                                 unsafe { (*c).resource_name = String::from_utf8(buf).unwrap_or_default() };
                         }
                 }
-                on("onServerResourceStop", |_source, args| {
+                on("onServerResourceStop", |_source: &str, args: &EventArgs| {
                         if args.len() == 0 { return; }
                         let resource = args.str(0);
                         let prefix = format!("{}/", resource);
@@ -1651,6 +1980,15 @@ pub mod natives {
 macro_rules! trace {
         ($($arg:tt)*) => {{
                 let msg = format!($($arg)*);
+                $crate::trace_str(&msg);
+        }};
+}
+
+#[macro_export]
+macro_rules! trace_ln {
+        ($($arg:tt)*) => {{
+                let mut msg = format!($($arg)*);
+                if !msg.ends_with('\n') { msg.push('\n'); }
                 $crate::trace_str(&msg);
         }};
 }

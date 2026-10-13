@@ -19,17 +19,15 @@ Server! {
         });
 
         let pending_connecting = pending.clone();
-        cfx::on("playerConnecting", move |source, args| {
-                let name = args.str(0).to_string();
+        cfx::on("playerConnecting", move |source: &str, name: String| {
                 let id = extract_id(source).to_string();
                 pending_connecting.borrow_mut().insert(id, name);
         });
 
         let pending_joining = pending.clone();
         let players_joining = players.clone();
-        cfx::on("playerJoining", move |source, args| {
-                let old_id = args.str(0);
-                let name = pending_joining.borrow_mut().remove(old_id).unwrap_or_else(|| "Unknown".to_string());
+        cfx::on("playerJoining", move |source: &str, old_id: String| {
+                let name = pending_joining.borrow_mut().remove(&old_id).unwrap_or_else(|| "Unknown".to_string());
                 let id = extract_id(source).to_string();
                 players_joining.borrow_mut().insert(id.clone(), name.clone());
                 let license = cfx::natives::cfx::get_player_identifier_by_type(&id, "license2");
@@ -38,8 +36,7 @@ Server! {
         });
 
         let players_dropped = players.clone();
-        cfx::on("playerDropped", move |source, args| {
-                let reason = args.str(0);
+        cfx::on("playerDropped", move |source: &str, reason: String| {
                 let id = extract_id(source).to_string();
                 let name = players_dropped.borrow().get(&id).cloned().unwrap_or_else(|| "Unknown".to_string());
                 let license = cfx::natives::cfx::get_player_identifier_by_type(&id, "license2");
@@ -48,10 +45,7 @@ Server! {
                 cfx::trace!("{} [{}] ({}) has disconnected ({}). Players Online: {}\n", name, license, id, reason, count);
         });
 
-        cfx::on_net("chatMessage", |_source, args| {
-                let author = args.int(0);
-                let name = args.str(1);
-                let message = args.str(2);
+        cfx::on_net("chatMessage", |_source: &str, author: i32, name: String, message: String| {
                 cfx::trace!("{} ({}) has sent a chat message: {}\n", name, author, message);
         });
 
@@ -63,7 +57,7 @@ Server! {
                 if args.is_empty() {
                         return cfx::Value::from("unknown");
                 }
-                let src = args.int(0).to_string();
+                let src = std::ffi::CString::new(args.int(0).to_string()).unwrap_or_default();
                 let name = cfx::native_string("GET_PLAYER_NAME", &[cfx::NativeArg::ptr(src.as_ptr() as u64)]);
                 let ping = cfx::native_int("GET_PLAYER_PING", &[cfx::NativeArg::ptr(src.as_ptr() as u64)]);
                 cfx::Value::from(format!("{} (ping={}ms)", name, ping))
