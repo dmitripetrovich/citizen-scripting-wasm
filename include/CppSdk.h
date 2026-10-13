@@ -36,6 +36,7 @@ struct ProcessResult
         int32_t exitCode = 0;
         std::string output;
         bool ok = false;
+        bool truncated = false;
 };
 
 struct NativeCtx
@@ -3010,17 +3011,21 @@ inline void createThread(F&& fn) { createCoroutine(std::forward<F>(fn)); }
 inline ProcessResult spawnProcess(const std::string& command, int32_t maxOutput = 65536)
 {
         ProcessResult result{ };
-        std::string buf(static_cast<size_t>(maxOutput), '\0');
-        result.status = __cfxSpawnProcess(command.c_str(), static_cast<uint32_t>(command.size()), buf.data(), maxOutput);
-        if (result.status >= 0)
-        {
-                result.ok = true;
-                buf.resize(static_cast<size_t>(result.status));
-        }
-        else
-                buf.clear();
-        result.output = std::move(buf);
+        int32_t capped = std::clamp(maxOutput, 0, 1 << 20);
+        std::string buf(static_cast<size_t>(capped) + 1, '\0');
+        int32_t status = __cfxSpawnProcess(command.c_str(), static_cast<uint32_t>(command.size()), buf.data(), capped + 1);
         result.exitCode = __cfxGetLastSpawnExitCode();
+        if (status < 0)
+        {
+                result.status = status;
+                return result;
+        }
+        int32_t copied = std::min(status, capped);
+        buf.resize(static_cast<size_t>(copied));
+        result.ok = true;
+        result.truncated = status > copied;
+        result.status = copied;
+        result.output = std::move(buf);
         return result;
 }
 

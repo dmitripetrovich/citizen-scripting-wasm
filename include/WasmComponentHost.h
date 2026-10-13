@@ -572,6 +572,7 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
                 return result;
         }
         result.ok = true;
+        result.truncated = outputCapped;
         result.status = static_cast<int32_t>(result.output.size());
         if (WIFEXITED(wstatus))
                 result.exitCode = WEXITSTATUS(wstatus);
