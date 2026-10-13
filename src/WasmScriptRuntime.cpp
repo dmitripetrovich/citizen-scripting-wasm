@@ -1105,17 +1105,19 @@ static wasm_trap_t* CbPollWorker(void* env, wasmtime_caller_t* caller, const was
         WasmMem mem;
         uint32_t outBuf = ArgU32(args[1]);
         int32_t outMax = args[2].of.i32;
-        if (!mem.init(caller) || outMax <= 0 || !mem.check(outBuf, static_cast<size_t>(outMax)))
+        if (!mem.init(caller) || outMax < 0 || !mem.check(outBuf, static_cast<size_t>(outMax)))
         {
-                if (state->thread.joinable())
-                        state->thread.join();
-                rt->m_workers.erase(it);
                 results[0] = I32Val(-2);
                 return nullptr;
         }
         std::vector<char> workerResult;
         {
                 std::lock_guard<std::mutex> lk(state->mutex);
+                if (state->result.size() > static_cast<size_t>(outMax))
+                {
+                        results[0] = I32Val(static_cast<int32_t>(state->result.size()));
+                        return nullptr;
+                }
                 workerResult = std::move(state->result);
         }
         int32_t written = 0;

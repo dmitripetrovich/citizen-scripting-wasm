@@ -3061,9 +3061,14 @@ inline WorkerResult pollWorker(int32_t workerId, int32_t maxOutput = 4096)
         maxOutput = std::clamp<int32_t>(maxOutput, 0, 1 << 20);
         std::string buf(static_cast<size_t>(maxOutput), '\0');
         int32_t raw = __cfxPollWorker(workerId, buf.data(), maxOutput);
+        if (raw > maxOutput && raw <= (1 << 20))
+        {
+                buf.resize(static_cast<size_t>(raw));
+                raw = __cfxPollWorker(workerId, buf.data(), raw);
+        }
         result.status = raw;
         if (raw >= 0)
-                buf.resize(static_cast<size_t>(raw));
+                buf.resize(std::min(static_cast<size_t>(raw), buf.size()));
         else
                 buf.clear();
         result.output = std::move(buf);

@@ -1204,7 +1204,11 @@ pub fn create_worker(fn_name: &str, input: &[u8]) -> i32 {
 pub fn poll_worker(worker_id: i32, max_output: usize) -> WorkerResult {
         let capped = max_output.min(1 << 20);
         let mut buf = vec![0u8; capped];
-        let raw = unsafe { __cfx_poll_worker(worker_id, buf.as_mut_ptr(), capped as i32) };
+        let mut raw = unsafe { __cfx_poll_worker(worker_id, buf.as_mut_ptr(), capped as i32) };
+        if raw > 0 && raw as usize > capped && raw <= 1 << 20 {
+                buf.resize(raw as usize, 0);
+                raw = unsafe { __cfx_poll_worker(worker_id, buf.as_mut_ptr(), raw) };
+        }
         if raw >= 0 {
                 buf.truncate(raw as usize);
         } else {
