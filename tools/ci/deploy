@@ -83,8 +83,28 @@ if [ -z "$choice" ]; then
         fi
 fi
 
+has_fivem=false
+has_redm=false
+for game in "${GAME_ARGS[@]}"; do
+        case "$game" in
+                fivem) has_fivem=true ;;
+                redm) has_redm=true ;;
+        esac
+done
+
+RDR3_WARNING="rdr3_warning 'I acknowledge that this is a prerelease build of RedM, and I am aware my resources *will* become incompatible once RedM ships.'"
+if $has_fivem && $has_redm; then
+        GAME_LINES="games { 'gta5', 'rdr3' }
+$RDR3_WARNING"
+elif $has_redm; then
+        GAME_LINES="game 'rdr3'
+$RDR3_WARNING"
+else
+        GAME_LINES="game 'gta5'"
+fi
+
 MANIFEST_HEADER="fx_version 'cerulean'
-game 'gta5'
+$GAME_LINES
 
 name 'example'
 author 'dmitripetrovich'
