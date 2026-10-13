@@ -458,9 +458,9 @@ def main():
                 if f.endswith(".h") and f != "all.h":
                         os.remove(os.path.join(output_dir, f))
 
-        all_h = "// Auto-generated, do not edit.\n#pragma once\n\nnamespace fx::natives\n{\n\n"
+        all_h = "// Auto-generated, do not edit.\n#pragma once\n\nnamespace cfx::natives\n{\n\n"
         all_h += "\n\n".join(cpp_blocks)
-        all_h += "\n\n} // namespace fx::natives\n"
+        all_h += "\n\n} // namespace cfx::natives\n"
         with open(os.path.join(output_dir, "all.h"), "w") as f:
                 f.write(all_h)
 

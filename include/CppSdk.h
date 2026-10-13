@@ -23,7 +23,11 @@ inline constexpr uint32_t HashString(std::string_view str)
 
 inline constexpr uint8_t MSGPACK_EMPTY_ARRAY = 0x90;
 
+#ifdef __wasm__
+namespace cfx
+#else
 namespace fx
+#endif
 {
 
 struct ProcessResult
@@ -740,7 +744,7 @@ inline void ensureArray(Value& v)
                 v = Value::array({ std::move(v) });
 }
 
-struct Writer : fx::MsgpackWriter
+struct Writer : cfx::MsgpackWriter
 {
         void encValue(const Value& v)
         {
@@ -873,7 +877,7 @@ using RefCallbackFn = std::function<std::vector<uint8_t>(const uint8_t*, uint32_
 
 }
 
-namespace fx::json
+namespace cfx::json
 {
 
 using Value = fxw_internal::Value;
@@ -1395,7 +1399,7 @@ inline std::string stringify(const Value& v)
 
 }
 
-namespace fx
+namespace cfx
 {
 
 struct NativeArg
@@ -1616,28 +1620,28 @@ inline void safeInvoke(F&& fn, const char* resourceName, const char* context)
 struct EventHandlerEntry
 {
         int32_t id;
-        fx::EventHandler handler;
+        cfx::EventHandler handler;
 };
 
 struct Context
 {
         std::string resourceName;
-        std::unordered_map<int32_t, std::shared_ptr<fx::TickHandler>> ticks;
-        std::unordered_map<int32_t, fx::StopHandler> stops;
+        std::unordered_map<int32_t, std::shared_ptr<cfx::TickHandler>> ticks;
+        std::unordered_map<int32_t, cfx::StopHandler> stops;
         int32_t nextTickId = 1;
         int32_t nextStopId = 1;
         std::unordered_map<std::string, std::vector<EventHandlerEntry>> events;
         std::unordered_map<int32_t, std::string> handlerEventMap;
         int32_t nextEventHandlerId = 1;
-        std::unordered_map<std::string, std::vector<fx::CommandHandler>> commands;
+        std::unordered_map<std::string, std::vector<cfx::CommandHandler>> commands;
         std::unordered_set<std::string> netSafeEvents;
         std::unordered_map<int32_t, TimerEntry> timers;
         int32_t nextTimerId = 1;
         std::unordered_map<int32_t, int32_t> stateBagHandlerRefs; // cookie -> hostRef
-        std::unordered_map<int32_t, fx::HttpCallback> httpCallbacks;
+        std::unordered_map<int32_t, cfx::HttpCallback> httpCallbacks;
         bool httpResponseRegistered = false;
         std::vector<int32_t> dispatchExpired; // scratch for dispatchTick
-        std::vector<std::shared_ptr<fx::TickHandler>> tickSnapshot; // scratch for dispatchTick
+        std::vector<std::shared_ptr<cfx::TickHandler>> tickSnapshot; // scratch for dispatchTick
 
         int32_t addTimer(uint32_t ms, uint32_t intervalMs, std::function<void()> cb)
         {
@@ -1646,7 +1650,7 @@ struct Context
                         fprintf(stderr, "[script:%s] timer limit (%zu) reached, dropping new timer\n", resourceName.c_str(), MAX_TIMERS);
                         return -1;
                 }
-                int32_t id = fx::allocateId(nextTimerId, timers);
+                int32_t id = cfx::allocateId(nextTimerId, timers);
                 if (id < 0)
                         return -1;
                 auto fire = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
@@ -1693,7 +1697,7 @@ struct Context
 
         void dispatchStop()
         {
-                std::vector<fx::StopHandler> snapshot;
+                std::vector<cfx::StopHandler> snapshot;
                 snapshot.reserve(stops.size());
                 for (auto& [id, h] : stops)
                         snapshot.push_back(h);
@@ -1715,8 +1719,8 @@ struct Context
                 }
                 Value decoded = decode(args, argsLen);
                 ensureArray(decoded);
-                fx::EventArgs ea(std::move(decoded));
-                std::vector<fx::EventHandler> snapshot;
+                cfx::EventArgs ea(std::move(decoded));
+                std::vector<cfx::EventHandler> snapshot;
                 snapshot.reserve(it->second.size());
                 for (auto& e : it->second)
                         snapshot.push_back(e.handler);
@@ -1769,14 +1773,14 @@ inline int32_t& nextCallbackId()
 
 }
 
-namespace fx::detail
+namespace cfx::detail
 {
 
 inline int32_t createRef(fxw_internal::RefCallbackFn cb)
 {
         auto& nextId = fxw_internal::nextCallbackId();
         auto& callbacks = fxw_internal::refCallbacks();
-        int32_t id = fx::allocateId(nextId, callbacks);
+        int32_t id = cfx::allocateId(nextId, callbacks);
         if (id < 0)
                 return -1;
         callbacks[id] = std::move(cb);
@@ -1890,7 +1894,7 @@ EventHandler WrapTypedHandler(F&& fn)
 
 }
 
-namespace fx
+namespace cfx
 {
 
 inline NativeCtx invokeNative(uint64_t hash, std::initializer_list<NativeArg> args, uint32_t numResults = 0, uint32_t resultPtrMask = 0)
@@ -1937,7 +1941,7 @@ inline std::vector<uint8_t> getBinaryResult(NativeCtx& ctx, int32_t ptrResultIdx
 
 }
 
-namespace fx::natives
+namespace cfx::natives
 {
 
 namespace detail
@@ -2050,13 +2054,13 @@ inline TResult invoke(uint64_t hash, TArgs&&... args)
 
 }
 
-namespace fx
+namespace cfx
 {
 
 template<typename TResult = void, typename... TArgs>
 inline TResult native(const char* name, TArgs&&... args)
 {
-        return fx::natives::invoke<TResult>(HashString(name), std::forward<TArgs>(args)...);
+        return cfx::natives::invoke<TResult>(HashString(name), std::forward<TArgs>(args)...);
 }
 
 template<typename F>
@@ -2072,7 +2076,7 @@ inline int32_t on(const std::string& event, F&& handler)
                 auto evIt = c->events.find(event);
                 bool isNewKey = evIt == c->events.end();
                 bool first = isNewKey || evIt->second.empty();
-                int32_t token = fx::allocateId(c->nextEventHandlerId, c->handlerEventMap);
+                int32_t token = cfx::allocateId(c->nextEventHandlerId, c->handlerEventMap);
                 if (token < 0)
                         return -1;
                 c->events[event].push_back({ token, std::move(h) });
@@ -2184,7 +2188,7 @@ template<typename... TArgs>
 __attribute__((format(printf, 1, 2)))
 inline void trace(const char* fmt, TArgs&&... args)
 {
-        static_assert((... && (std::is_trivially_copyable_v<std::decay_t<TArgs>>)), "fx::trace arguments must be trivially copyable (use .c_str() for std::string)");
+        static_assert((... && (std::is_trivially_copyable_v<std::decay_t<TArgs>>)), "cfx::trace arguments must be trivially copyable (use .c_str() for std::string)");
         if constexpr (sizeof...(args) == 0)
         {
                 if (fmt && fmt[0])
@@ -2217,7 +2221,7 @@ template<typename... TArgs>
 __attribute__((format(printf, 1, 2)))
 inline void traceLn(const char* fmt, TArgs&&... args)
 {
-        static_assert((... && (std::is_trivially_copyable_v<std::decay_t<TArgs>>)), "fx::traceLn arguments must be trivially copyable (use .c_str() for std::string)");
+        static_assert((... && (std::is_trivially_copyable_v<std::decay_t<TArgs>>)), "cfx::traceLn arguments must be trivially copyable (use .c_str() for std::string)");
         if constexpr (sizeof...(args) == 0)
         {
                 if (!fmt || !fmt[0])
@@ -2268,10 +2272,10 @@ inline int32_t onTick(TickHandler h)
         auto* c = fxw_internal::currentContext();
         if (!c)
                 return -1;
-        int32_t id = fx::allocateId(c->nextTickId, c->ticks);
+        int32_t id = cfx::allocateId(c->nextTickId, c->ticks);
         if (id < 0)
                 return -1;
-        c->ticks[id] = std::make_shared<fx::TickHandler>(std::move(h));
+        c->ticks[id] = std::make_shared<cfx::TickHandler>(std::move(h));
         return id;
 }
 
@@ -2280,7 +2284,7 @@ inline int32_t onStop(StopHandler h)
         auto* c = fxw_internal::currentContext();
         if (!c)
                 return -1;
-        int32_t id = fx::allocateId(c->nextStopId, c->stops);
+        int32_t id = cfx::allocateId(c->nextStopId, c->stops);
         if (id < 0)
                 return -1;
         c->stops[id] = std::move(h);
@@ -2681,7 +2685,7 @@ inline void onCommand(const std::string& command, CommandHandler h)
 
 }
 
-namespace fx
+namespace cfx
 {
 
 inline void performHttpRequest(const std::string& url, HttpCallback cb, const std::string& method = "GET", const std::string& data = "", std::initializer_list<std::pair<std::string, std::string>> headers = {}, bool followLocation = true)
@@ -2934,7 +2938,7 @@ inline void cleanupCoroutines()
 
 }
 
-namespace fx
+namespace cfx
 {
 
 using ScriptTask = fxw_internal::WasmTask;
@@ -2974,7 +2978,7 @@ namespace detail
                 auto stored = std::make_shared<std::decay_t<F>>(std::forward<F>(fn));
                 auto task = (*stored)();
                 auto& nextId = fxw_internal::nextCoroutineId();
-                int32_t id = fx::allocateId(nextId, coros);
+                int32_t id = cfx::allocateId(nextId, coros);
                 if (id < 0)
                 {
                         fprintf(stderr, "[script:%s] no free coroutine id, dropping new thread\n", c->resourceName.c_str());
@@ -3032,7 +3036,7 @@ inline ProcessResult spawnProcess(const std::string& command, int32_t maxOutput 
         }                                                                                                   \
         static int32_t name##_impl(const char* input, int32_t input_len, char* result, int32_t result_max)
 
-namespace fx
+namespace cfx
 {
 
 struct WorkerResult
@@ -3114,13 +3118,13 @@ CFX_WASM_EXPORT(__cfx_on_stop)
 void __cfxOnStop()
 {
         fxw_internal::cleanupCoroutines();
-        fx::detail::exportRefCache().clear();
+        cfx::detail::exportRefCache().clear();
         if (auto* c = fxw_internal::currentContext())
         {
                 for (auto& [cookie, hostRef] : c->stateBagHandlerRefs)
                 {
-                        fx::invokeNative(HashString("REMOVE_STATE_BAG_CHANGE_HANDLER"), { fx::NativeArg(cookie) });
-                        fx::detail::removeRef(hostRef);
+                        cfx::invokeNative(HashString("REMOVE_STATE_BAG_CHANGE_HANDLER"), { cfx::NativeArg(cookie) });
+                        cfx::detail::removeRef(hostRef);
                 }
                 c->stateBagHandlerRefs.clear();
                 c->dispatchStop();
@@ -3193,10 +3197,10 @@ void __cfx_init()
                         __cfxGetResourceMetadata(k, sizeof(k) - 1, 0, s_ctx.resourceName.data(), len + 1);
                 }
         }
-        fx::on("onServerResourceStop", [](const std::string&, std::string resource)
+        cfx::on("onServerResourceStop", [](const std::string&, std::string resource)
         {
                 std::string prefix = resource + '/';
-                auto& cache = fx::detail::exportRefCache();
+                auto& cache = cfx::detail::exportRefCache();
                 for (auto it = cache.begin(); it != cache.end(); )
                 {
                         if (it->first.starts_with(prefix))
