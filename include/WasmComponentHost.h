@@ -462,9 +462,14 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
         posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
         posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDERR_FILENO);
         posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+        posix_spawnattr_t attr;
+        posix_spawnattr_init(&attr);
+        posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+        posix_spawnattr_setpgroup(&attr, 0);
         pid_t pid = 0;
-        int spawnErr = searchPath ? posix_spawnp(&pid, path, &actions, nullptr, const_cast<char**>(argv), envp.data()) : posix_spawn(&pid, path, &actions, nullptr, const_cast<char**>(argv), envp.data());
+        int spawnErr = searchPath ? posix_spawnp(&pid, path, &actions, &attr, const_cast<char**>(argv), envp.data()) : posix_spawn(&pid, path, &actions, &attr, const_cast<char**>(argv), envp.data());
         posix_spawn_file_actions_destroy(&actions);
+        posix_spawnattr_destroy(&attr);
         if (spawnErr != 0)
         {
                 close(pipefd[0]);
@@ -551,16 +556,16 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
         if (wp == 0)
         {
                 if (timedOut)
-                        kill(pid, SIGKILL);
+                        kill(-pid, SIGKILL);
                 else if (outputCapped)
                 {
-                        kill(pid, SIGTERM);
+                        kill(-pid, SIGTERM);
                         auto termDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
                         pid_t wr;
                         while ((wr = waitpid(pid, &wstatus, WNOHANG)) == 0 && std::chrono::steady_clock::now() < termDeadline)
                                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
                         if (wr == 0)
-                                kill(pid, SIGKILL);
+                                kill(-pid, SIGKILL);
                 }
                 waitpid(pid, &wstatus, 0);
         }
