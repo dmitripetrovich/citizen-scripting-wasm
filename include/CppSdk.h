@@ -2572,7 +2572,7 @@ inline json::Value callExport(const std::string& resource, const std::string& na
                 if (exportRef.empty())
                         return { };
                 cache.emplace(cacheKey, exportRef);
-                if (exportRef != oldRef)
+                if (exportRef == oldRef)
                         return { };
                 retData = detail::invokeFunctionReference(exportRef, userPayload.data(), static_cast<uint32_t>(userPayload.size()));
                 if (retData.empty())

@@ -917,7 +917,7 @@ pub fn call_export(resource: &str, name: &str, args: &[Value]) -> Value {
                 let resolved = resolve_export_ref(resource, name);
                 if resolved.is_empty() { return Value::Null; }
                 unsafe { (*ctx()).export_ref_cache.insert(cache_key.clone(), resolved.clone()) };
-                if resolved != export_ref {
+                if resolved == export_ref {
                         return Value::Null;
                 }
                 export_ref = resolved;
