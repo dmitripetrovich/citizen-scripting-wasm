@@ -505,7 +505,7 @@ struct Reader
                 }
                 Value v;
                 v.kind = Value::Kind::Object;
-                for (uint32_t i = 0; i < n; ++i)
+                for (uint32_t i = 0; i < n && !error; ++i)
                 {
                         auto key = read(d + 1);
                         auto val = read(d + 1);
@@ -537,8 +537,13 @@ struct Reader
 
         Value read(int d = 0)
         {
-                if (d > 64 || p >= end || error)
+                if (error)
                         return { };
+                if (d > 64 || p >= end)
+                {
+                        error = true;
+                        return { };
+                }
                 uint8_t b = u8();
                 Value v;
                 if ((b & 0x80) == 0)
@@ -565,7 +570,7 @@ struct Reader
                 {
                         v.kind = Value::Kind::Array;
                         uint32_t n = b & 0x0F;
-                        for (uint32_t i = 0; i < n; ++i)
+                        for (uint32_t i = 0; i < n && !error; ++i)
                                 v.children.push_back(read(d + 1));
                         return v;
                 }
@@ -676,7 +681,7 @@ struct Reader
                                         return { };
                                 }
                                 v.kind = Value::Kind::Array;
-                                for (uint32_t i = 0; i < n; ++i)
+                                for (uint32_t i = 0; i < n && !error; ++i)
                                         v.children.push_back(read(d + 1));
                                 return v;
                         }
@@ -689,7 +694,7 @@ struct Reader
                                         return { };
                                 }
                                 v.kind = Value::Kind::Array;
-                                for (uint32_t i = 0; i < n; ++i)
+                                for (uint32_t i = 0; i < n && !error; ++i)
                                         v.children.push_back(read(d + 1));
                                 return v;
                         }

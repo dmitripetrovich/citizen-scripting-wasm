@@ -323,7 +323,7 @@ impl<'a> MsgpackReader<'a> {
         fn u64(&mut self) -> u64 { let a = self.u32() as u64; let b = self.u32() as u64; (a << 32) | b }
 
         fn bytes(&mut self, n: usize) -> &'a [u8] {
-                if self.pos + n > self.data.len() { self.error = true; return &[]; }
+                if n > self.data.len() - self.pos { self.error = true; return &[]; }
                 let s = &self.data[self.pos..self.pos + n]; self.pos += n; s
         }
 
@@ -344,8 +344,9 @@ impl<'a> MsgpackReader<'a> {
                         let k = if let Value::String(s) = key { s } else { "0".to_string() };
                         return Value::Object(vec![(k, val)]);
                 }
-                let mut entries = Vec::with_capacity(n as usize);
+                let mut entries = Vec::new();
                 for i in 0..n {
+                        if self.error { break; }
                         let key = self.read(depth + 1);
                         let val = self.read(depth + 1);
                         let k = if let Value::String(s) = key { s } else { i.to_string() };
@@ -364,7 +365,8 @@ impl<'a> MsgpackReader<'a> {
         }
 
         fn read(&mut self, depth: i32) -> Value {
-                if depth > 64 || self.pos >= self.data.len() || self.error { return Value::Null; }
+                if self.error { return Value::Null; }
+                if depth > 64 || self.pos >= self.data.len() { self.error = true; return Value::Null; }
                 let b = self.u8();
                 if (b & 0x80) == 0 { return Value::Int(b as i64); }
                 if (b & 0xE0) == 0xE0 { return Value::Int((b as i8) as i64); }
@@ -372,7 +374,7 @@ impl<'a> MsgpackReader<'a> {
                 if (b & 0xF0) == 0x90 {
                         let n = (b & 0x0F) as usize;
                         let mut arr = Vec::with_capacity(n);
-                        for _ in 0..n { arr.push(self.read(depth + 1)); }
+                        for _ in 0..n { if self.error { break; } arr.push(self.read(depth + 1)); }
                         return Value::Array(arr);
                 }
                 if (b & 0xF0) == 0x80 { return self.read_map((b & 0x0F) as u32, depth); }
@@ -396,8 +398,8 @@ impl<'a> MsgpackReader<'a> {
                         0xD3 => Value::Int(self.u64() as i64),
                         0xCA => Value::Float(f32::from_bits(self.u32()) as f64),
                         0xCB => Value::Float(f64::from_bits(self.u64())),
-                        0xDC => { let n = self.u16() as usize; if n > 65536 { self.error = true; return Value::Null; } let mut a = Vec::with_capacity(n); for _ in 0..n { a.push(self.read(depth+1)); } Value::Array(a) }
-                        0xDD => { let n = self.u32() as usize; if n > 65536 { self.error = true; return Value::Null; } let mut a = Vec::with_capacity(n); for _ in 0..n { a.push(self.read(depth+1)); } Value::Array(a) }
+                        0xDC => { let n = self.u16() as usize; if n > 65536 { self.error = true; return Value::Null; } let mut a = Vec::new(); for _ in 0..n { if self.error { break; } a.push(self.read(depth+1)); } Value::Array(a) }
+                        0xDD => { let n = self.u32() as usize; if n > 65536 { self.error = true; return Value::Null; } let mut a = Vec::new(); for _ in 0..n { if self.error { break; } a.push(self.read(depth+1)); } Value::Array(a) }
                         0xD4 => self.read_ext(1),
                         0xD5 => self.read_ext(2),
                         0xD6 => self.read_ext(4),
