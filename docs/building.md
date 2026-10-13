@@ -28,19 +28,3 @@ make -C build -f citizen-scripting-wasm.make config=release \
 ### Install runtime
 
 Copy `build/bin/Release/libcitizen-scripting-wasm.so` and `libcitizen-scripting-wasm.json` next to your FXServer binary.
-
-### Writing a resource
-
-Reference `.cpp` or `.rs` files directly in your manifest, the runtime compiles them automatically:
-
-```lua
-server_script 'server.cpp'
-```
-
-```lua
-server_script 'server.rs'
-```
-
-The compiled `.wasm` is cached next to the source and only rebuilt when the source changes.
-
-You can also pre-compile with `tools/ext/build` and use `.wasm` directly if preferred.
