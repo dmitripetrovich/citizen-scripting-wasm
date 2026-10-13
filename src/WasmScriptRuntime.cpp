@@ -1156,7 +1156,11 @@ WasmScriptRuntime::WasmScriptRuntime()
 
 WasmScriptRuntime::~WasmScriptRuntime()
 {
-        Destroy();
+        if (!m_destroyed)
+        {
+                AddRef();
+                Destroy();
+        }
         std::lock_guard<std::mutex> lk(s_instanceIdMutex);
         s_activeInstanceIds.erase(m_instanceId);
 }
@@ -2198,10 +2202,11 @@ static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, 
 static const std::string& getRustcHash()
 {
         static std::string s_hash;
-        static bool s_tried = false;
-        if (!s_tried)
+        static std::chrono::steady_clock::time_point s_nextAttempt{ };
+        auto now = std::chrono::steady_clock::now();
+        if (s_hash.empty() && now >= s_nextAttempt)
         {
-                s_tried = true;
+                s_nextAttempt = now + std::chrono::seconds(30);
                 auto result = fx::spawnProgram({ "rustc", "-vV" }, 65536, 10000);
                 std::string reason;
                 if (!processFailed(result, reason))
