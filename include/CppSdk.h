@@ -648,10 +648,13 @@ struct Reader
                                 v.isIntegral = true;
                                 return v;
                         case 0xCF:
+                        {
+                                uint64_t n = u64();
                                 v.kind = Value::Kind::Number;
-                                v.numVal = static_cast<double>(u64());
-                                v.isIntegral = true;
+                                v.numVal = static_cast<double>(n);
+                                v.isIntegral = n <= static_cast<uint64_t>(INT64_MAX);
                                 return v;
+                        }
                         case 0xD0:
                                 v.kind = Value::Kind::Number;
                                 v.numVal = static_cast<int8_t>(u8());
