@@ -541,6 +541,13 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
         }
         close(pipefd[0]);
         pid_t wp = waitpid(pid, &wstatus, WNOHANG);
+        if (wp == 0 && !timedOut && !outputCapped)
+        {
+                while ((wp = waitpid(pid, &wstatus, WNOHANG)) == 0 && std::chrono::steady_clock::now() < deadline)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                if (wp == 0)
+                        timedOut = true;
+        }
         if (wp == 0)
         {
                 if (timedOut)
