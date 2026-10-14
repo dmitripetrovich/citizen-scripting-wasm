@@ -1331,7 +1331,6 @@ result_t OM_DECL WasmScriptRuntime::Destroy()
                         if (!mod->hasStopFn || !mod->store)
                                 continue;
                         BoundaryGuard boundary(m_host.GetRef(), static_cast<int64_t>(nextBoundaryId()));
-                        mod->refuelWasm();
                         mod->callVoid(mod->fnStop);
                 }
         }
@@ -1412,10 +1411,14 @@ bool WasmModule::call(const wasmtime_func_t& fn, const wasmtime_val_t* args, siz
 {
         if (!store)
                 return false;
+        if (callDepth == 0)
+                refuelWasm();
+        ++callDepth;
         WasmModule* prev = rt->m_activeModule;
         rt->m_activeModule = this;
         bool ok = WasmCall(store, fn, args, nargs, results, nresults, rt->resourceName().c_str(), label);
         rt->m_activeModule = prev;
+        --callDepth;
         return ok;
 }
 
@@ -1504,7 +1507,6 @@ bool WasmScriptRuntime::callInvokeRef(WasmModule& mod, uint32_t callbackId, cons
 {
         if (!mod.hasInvokeRefFn || !mod.store || !mod.hasAllocFn)
                 return false;
-        mod.refuelWasm();
         uint32_t argsAllocSz = argsSize > 0 ? argsSize : 1;
         uint32_t argsPtr = mod.wasmAlloc(argsAllocSz);
         if (!argsPtr)
@@ -1864,7 +1866,6 @@ result_t WasmScriptRuntime::loadWasm(const std::vector<uint8_t>& wasmBytes, cons
                 }
         }
         m_modules.push_back(mod);
-        mod->refuelWasm();
         fx::PushEnvironment envGuard(static_cast<IScriptRuntime*>(this));
         if (!resolveExports(*mod))
         {
@@ -1894,7 +1895,6 @@ result_t OM_DECL WasmScriptRuntime::Tick()
         {
                 if (!mod->hasTickFn || !mod->store)
                         continue;
-                mod->refuelWasm();
                 if (mod->hasHasPendingWorkFn)
                 {
                         wasmtime_val_t ret{ };
@@ -1930,7 +1930,6 @@ result_t OM_DECL WasmScriptRuntime::TickBookmarks(uint64_t* bookmarks, int32_t n
                 }
                 auto& mod = **it;
                 uint32_t arrSize = static_cast<uint32_t>(wasmIds.size() * sizeof(int32_t));
-                mod.refuelWasm();
                 uint32_t arrPtr = mod.wasmAlloc(arrSize);
                 if (arrPtr)
                 {
@@ -1988,7 +1987,6 @@ result_t OM_DECL WasmScriptRuntime::TriggerEvent(char* eventName, char* argsSeri
         {
                 if (!mod->hasEventFn || !mod->store)
                         continue;
-                mod->refuelWasm();
                 uint32_t block = mod->wasmAlloc(totalSz);
                 if (!block)
                         continue;

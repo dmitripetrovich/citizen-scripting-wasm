@@ -3737,6 +3737,7 @@ struct WasmModule : std::enable_shared_from_this<WasmModule>
         bool hasValidNativeResult = false;
         fxNativeContext lastNativeCtx{ };
         uint32_t lastResultPtrMask = 0;
+        int32_t callDepth = 0;
         std::unordered_map<int32_t, uint64_t> wasmToHostBookmark;
 
         uint8_t* wasmBase();
