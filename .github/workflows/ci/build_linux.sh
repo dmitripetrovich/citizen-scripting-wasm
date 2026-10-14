@@ -13,4 +13,8 @@ make -C build config=release \
         CXX="zig c++ -target x86_64-linux-musl" \
         -j"$(nproc)"
 
+echo "Building examples..."
+tools/ext/build tools/example/cpp/server.cpp
+tools/ext/build tools/example/rust/server.rs
+
 echo "All checks passed."

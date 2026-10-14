@@ -2,4 +2,5 @@ build/
 src/natives
 src/sdk.blob
 tools/.cache
+tools/example/**/*.wasm
 vendor/wasmtime
