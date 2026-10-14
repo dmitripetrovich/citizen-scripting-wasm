@@ -21,7 +21,9 @@ jobs:
 
                         - name: Install Zig
                           run: |
-                                  curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz | sudo tar -xJ -C /usr/local
+                                  curl -fsSL https://ziglang.org/download/0.15.2/zig-x86_64-linux-0.15.2.tar.xz -o /tmp/zig.tar.xz
+                                  echo "02aa270f183da276e5b5920b1dac44a63f1a49e55050ebde3aecc9eb82f93239  /tmp/zig.tar.xz" | sha256sum -c -
+                                  sudo tar -xJf /tmp/zig.tar.xz -C /usr/local
                                   sudo ln -s /usr/local/zig-x86_64-linux-0.15.2/zig /usr/local/bin/zig
 
                         - name: Install Rust wasm target
@@ -29,7 +31,9 @@ jobs:
 
                         - name: Install premake5
                           run: |
-                                  curl -fsSL https://github.com/premake/premake-core/releases/download/v5.0.0-beta4/premake-5.0.0-beta4-linux.tar.gz | sudo tar -xz -C /usr/local/bin
+                                  curl -fsSL https://github.com/premake/premake-core/releases/download/v5.0.0-beta4/premake-5.0.0-beta4-linux.tar.gz -o /tmp/premake.tar.gz
+                                  echo "98c0dbf55f20d28ecc2b5fdd4a5c9bfe5ef461d26d3b023b4dfd7d75f4df3a3f  /tmp/premake.tar.gz" | sha256sum -c -
+                                  sudo tar -xzf /tmp/premake.tar.gz -C /usr/local/bin
                                   sudo chmod +x /usr/local/bin/premake5
 
                         - name: Cache wasmtime

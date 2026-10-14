@@ -3,6 +3,7 @@ set -euo pipefail
 
 WASMTIME_VERSION="45.0.0"
 WASMTIME_TARGET="x86_64-musl"
+WASMTIME_SHA256="24c07f9093bb0f3f418e61219c51317ef49bed988699c1814fbdbe00453a7a88"
 TARBALL_NAME="wasmtime-v${WASMTIME_VERSION}-${WASMTIME_TARGET}-c-api.tar.xz"
 DOWNLOAD_URL="https://github.com/bytecodealliance/wasmtime/releases/download/v${WASMTIME_VERSION}/${TARBALL_NAME}"
 OUT_DIR="$(cd "$(dirname "$0")/../.." && pwd)/vendor/wasmtime"
@@ -17,6 +18,17 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 curl -fSL "$DOWNLOAD_URL" -o "$TMP/$TARBALL_NAME"
+
+if command -v sha256sum >/dev/null; then
+        ACTUAL_SHA256=$(sha256sum "$TMP/$TARBALL_NAME" | cut -d' ' -f1)
+else
+        ACTUAL_SHA256=$(shasum -a 256 "$TMP/$TARBALL_NAME" | cut -d' ' -f1)
+fi
+if [[ "$ACTUAL_SHA256" != "$WASMTIME_SHA256" ]]; then
+        echo "Error: checksum mismatch for $TARBALL_NAME (expected $WASMTIME_SHA256, got $ACTUAL_SHA256)" >&2
+        exit 1
+fi
+
 tar -xf "$TMP/$TARBALL_NAME" -C "$TMP"
 
 rm -rf "$OUT_DIR"
