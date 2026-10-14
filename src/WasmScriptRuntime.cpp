@@ -957,6 +957,12 @@ static void RunWorker(std::shared_ptr<WasmScriptRuntime::WorkerState> state, was
                 return;
         }
         auto* storeCtx = wasmtime_store_context(store);
+        wasmtime_extern_t ctorExt{ };
+        if (wasmtime_instance_export_get(storeCtx, &instance, "_initialize", 11, &ctorExt) && ctorExt.kind == WASMTIME_EXTERN_FUNC && !WasmCall(store, ctorExt.of.func, nullptr, 0, nullptr, 0, "worker", "_initialize"))
+        {
+                finalize(WasmScriptRuntime::WorkerState::Error);
+                return;
+        }
         wasmtime_extern_t memExt{ };
         bool hasMem = wasmtime_instance_export_get(storeCtx, &instance, "memory", 6, &memExt) && memExt.kind == WASMTIME_EXTERN_MEMORY;
         wasmtime_extern_t allocExt{ };
@@ -1510,6 +1516,9 @@ bool WasmScriptRuntime::resolveExports(WasmModule& mod)
                 return true;
         };
         {
+                wasmtime_func_t ctorFn{ };
+                if (get("_initialize", ctorFn) && !mod.call(ctorFn, nullptr, 0, nullptr, 0, "_initialize trap"))
+                        return false;
                 wasmtime_func_t initFn{ };
                 if (!get("__cfx_init", initFn))
                 {
