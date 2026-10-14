@@ -1619,18 +1619,11 @@ bool WasmScriptRuntime::resolveExports(WasmModule& mod)
                 fn = ext.of.func;
                 return true;
         };
+        wasmtime_func_t initFn{ };
+        if (!get("__cfx_init", initFn))
         {
-                wasmtime_func_t ctorFn{ };
-                if (get("_initialize", ctorFn) && !mod.call(ctorFn, nullptr, 0, nullptr, 0, "_initialize trap"))
-                        return false;
-                wasmtime_func_t initFn{ };
-                if (!get("__cfx_init", initFn))
-                {
-                        LogError("'%s' in resource '%s' missing __cfx_init export", mod.scriptFile.c_str(), m_resourceName.c_str());
-                        return false;
-                }
-                if (!mod.call(initFn, nullptr, 0, nullptr, 0, "__cfx_init trap"))
-                        return false;
+                LogError("'%s' in resource '%s' missing __cfx_init export", mod.scriptFile.c_str(), m_resourceName.c_str());
+                return false;
         }
         mod.hasTickFn = get("__cfx_on_tick", mod.fnTick);
         mod.hasEventFn = get("__cfx_on_event", mod.fnEvent);
@@ -1648,7 +1641,10 @@ bool WasmScriptRuntime::resolveExports(WasmModule& mod)
                 mod.memory = memExt.of.memory;
                 mod.hasMemory = true;
         }
-        return true;
+        wasmtime_func_t ctorFn{ };
+        if (get("_initialize", ctorFn) && !mod.call(ctorFn, nullptr, 0, nullptr, 0, "_initialize trap"))
+                return false;
+        return mod.call(initFn, nullptr, 0, nullptr, 0, "__cfx_init trap");
 }
 
 static struct OrphanedWorkerList
