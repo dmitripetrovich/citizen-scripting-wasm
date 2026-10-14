@@ -792,8 +792,6 @@ static wasm_trap_t* CbSpawnProcess(void* env, wasmtime_caller_t* caller, const w
                 return nullptr;
         }
         uint32_t cmdPtr = ArgU32(args[0]), cmdLen = ArgU32(args[1]);
-        uint32_t outBuf = ArgU32(args[2]);
-        int32_t outMax = args[3].of.i32;
         if (!mem.check(cmdPtr, cmdLen))
         {
                 results[0] = I32Val(-2);
@@ -805,23 +803,87 @@ static wasm_trap_t* CbSpawnProcess(void* env, wasmtime_caller_t* caller, const w
                 results[0] = I32Val(-1);
                 return nullptr;
         }
+        if (rt->m_processes.size() >= static_cast<size_t>(WasmScriptRuntime::MAX_PROCESSES_PER_RESOURCE))
+        {
+                LogError("Resource '%s' exceeded max child process limit (%d)", rt->resourceName().c_str(), WasmScriptRuntime::MAX_PROCESSES_PER_RESOURCE);
+                results[0] = I32Val(-2);
+                return nullptr;
+        }
+        int32_t processId = fx::allocateId(rt->m_nextProcessId, rt->m_processes);
+        if (processId < 0)
+        {
+                results[0] = I32Val(-2);
+                return nullptr;
+        }
         std::string cmd = mem.readStr(cmdPtr, cmdLen);
         std::string displayCmd = UTF8Truncate(cmd, 256);
         LogWarning("Resource '%s' spawning child process: %s", rt->resourceName().c_str(), displayCmd.c_str());
-        fx::ProcessResult pr = fx::spawnProcess(cmd);
-        mod->lastSpawnExitCode = pr.exitCode;
-        if (pr.status == -2 || pr.status == -3)
+        auto state = std::make_shared<WasmScriptRuntime::ProcessState>();
+        state->owner = mod;
+        try
         {
-                results[0] = I32Val(pr.status);
+                std::thread([state, cmd = std::move(cmd)]
+                {
+                        fx::ProcessResult pr = fx::spawnProcess(cmd);
+                        std::lock_guard<std::mutex> lk(state->mutex);
+                        state->result = std::move(pr);
+                        state->done = true;
+                }).detach();
+        }
+        catch (...)
+        {
+                results[0] = I32Val(-2);
                 return nullptr;
         }
-        results[0] = I32Val(mem.writeStr(outBuf, outMax, pr.output));
+        rt->m_processes[processId] = std::move(state);
+        results[0] = I32Val(processId);
         return nullptr;
 }
 
-static wasm_trap_t* CbGetLastSpawnExitCode(void* env, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t* results, size_t)
+static wasm_trap_t* CbPollProcess(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t* results, size_t)
 {
-        results[0] = I32Val(static_cast<WasmModule*>(env)->lastSpawnExitCode);
+        auto* mod = static_cast<WasmModule*>(env);
+        auto* rt = mod->rt;
+        int32_t processId = args[0].of.i32;
+        auto it = rt->m_processes.find(processId);
+        if (it == rt->m_processes.end() || it->second->owner != mod)
+        {
+                results[0] = I32Val(-2);
+                return nullptr;
+        }
+        auto state = it->second;
+        std::lock_guard<std::mutex> lk(state->mutex);
+        if (!state->done)
+        {
+                results[0] = I32Val(-4);
+                return nullptr;
+        }
+        WasmMem mem;
+        uint32_t outBuf = ArgU32(args[1]);
+        int32_t outMax = args[2].of.i32;
+        uint32_t infoPtr = ArgU32(args[3]);
+        if (!mem.init(caller) || outMax < 0 || !mem.check(outBuf, static_cast<size_t>(outMax)) || !mem.check(infoPtr, 8))
+        {
+                results[0] = I32Val(-2);
+                return nullptr;
+        }
+        const fx::ProcessResult& pr = state->result;
+        if (pr.status >= 0 && pr.output.size() > static_cast<size_t>(outMax))
+        {
+                results[0] = I32Val(static_cast<int32_t>(pr.output.size()));
+                return nullptr;
+        }
+        int32_t info[2] = { pr.exitCode, pr.truncated ? 1 : 0 };
+        memcpy(mem.base + infoPtr, info, sizeof(info));
+        int32_t status = pr.status;
+        if (status >= 0)
+        {
+                if (!pr.output.empty())
+                        memcpy(mem.base + outBuf, pr.output.data(), pr.output.size());
+                status = static_cast<int32_t>(pr.output.size());
+        }
+        rt->m_processes.erase(it);
+        results[0] = I32Val(status);
         return nullptr;
 }
 
@@ -856,8 +918,8 @@ static const ImportDesc g_imports[] = {
         { "remove_ref", { WASM_I32 }, { }, CbRemoveRef, CbWorkerStub },
         { "invoke_function_reference", { WASM_I32, WASM_I32, WASM_I32, WASM_I32, WASM_I32 }, { }, CbInvokeFunctionReference, CbWorkerStub },
         { "get_instance_id", { }, { WASM_I32 }, CbGetInstanceId, CbWorkerStub },
-        { "spawn_process", { WASM_I32, WASM_I32, WASM_I32, WASM_I32 }, { WASM_I32 }, CbSpawnProcess, CbWorkerStub },
-        { "get_last_spawn_exit_code", { }, { WASM_I32 }, CbGetLastSpawnExitCode, CbWorkerStub },
+        { "spawn_process", { WASM_I32, WASM_I32 }, { WASM_I32 }, CbSpawnProcess, CbWorkerStub },
+        { "poll_process", { WASM_I32, WASM_I32, WASM_I32, WASM_I32 }, { WASM_I32 }, CbPollProcess, CbWorkerStub },
         { "create_worker", { WASM_I32, WASM_I32, WASM_I32, WASM_I32 }, { WASM_I32 }, CbCreateWorker, CbWorkerStub },
         { "poll_worker", { WASM_I32, WASM_I32, WASM_I32 }, { WASM_I32 }, CbPollWorker, CbWorkerStub },
         { "schedule_bookmark", { WASM_I32, WASM_I32 }, { }, CbScheduleBookmark, CbWorkerStub },
@@ -1237,6 +1299,7 @@ result_t OM_DECL WasmScriptRuntime::Destroy()
         m_pendingLoads.clear();
         m_refs.clear();
         m_refToCallbackId.clear();
+        m_processes.clear();
         destroyWorkers();
         for (auto& mod : m_modules)
                 destroyModule(*mod);
@@ -1692,6 +1755,7 @@ void WasmScriptRuntime::destroyModule(WasmModule& mod)
                 if (w->owner == &mod)
                         w->owner = nullptr;
         }
+        std::erase_if(m_processes, [&](const auto& p) { return p.second->owner == &mod; });
         mod.wasmToHostBookmark.clear();
         if (mod.linker)
         {

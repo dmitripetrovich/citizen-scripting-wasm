@@ -88,9 +88,9 @@ extern "C" {
         #[link_name = "get_instance_id"]
         fn __cfx_get_instance_id() -> i32;
         #[link_name = "spawn_process"]
-        fn __cfx_spawn_process(cmd: *const u8, cmd_len: u32, out_buf: *mut u8, out_buf_max: i32) -> i32;
-        #[link_name = "get_last_spawn_exit_code"]
-        fn __cfx_get_last_spawn_exit_code() -> i32;
+        fn __cfx_spawn_process(cmd: *const u8, cmd_len: u32) -> i32;
+        #[link_name = "poll_process"]
+        fn __cfx_poll_process(process_id: i32, out_buf: *mut u8, out_buf_max: i32, info: *mut [i32; 2]) -> i32;
         #[link_name = "create_worker"]
         fn __cfx_create_worker(fn_name: *const u8, fn_name_len: u32, input: *const u8, input_len: u32) -> i32;
         #[link_name = "poll_worker"]
@@ -1254,21 +1254,30 @@ pub struct ProcessResult {
         pub truncated: bool,
 }
 
-pub fn spawn_process(command: &str, max_output: i32) -> ProcessResult {
-        let capped = max_output.clamp(0, 1 << 20);
-        let mut buf = vec![0u8; capped as usize + 1];
-        let status = unsafe { __cfx_spawn_process(command.as_ptr(), command.len() as u32, buf.as_mut_ptr(), capped + 1) };
-        let exit_code = unsafe { __cfx_get_last_spawn_exit_code() };
-        if status < 0 {
-                return ProcessResult { status, exit_code, output: String::new(), ok: false, truncated: false };
+impl ProcessResult {
+        pub fn is_running(&self) -> bool { self.status == -4 }
+        pub fn is_done(&self) -> bool { self.status >= 0 }
+}
+
+pub fn spawn_process(command: &str) -> i32 {
+        unsafe { __cfx_spawn_process(command.as_ptr(), command.len() as u32) }
+}
+
+pub fn poll_process(process_id: i32, max_output: usize) -> ProcessResult {
+        let capped = max_output.min(1 << 20);
+        let mut buf = vec![0u8; capped];
+        let mut info = [0i32; 2];
+        let mut raw = unsafe { __cfx_poll_process(process_id, buf.as_mut_ptr(), capped as i32, &mut info) };
+        if raw > 0 && raw as usize > capped && raw <= 1 << 20 {
+                buf.resize(raw as usize, 0);
+                raw = unsafe { __cfx_poll_process(process_id, buf.as_mut_ptr(), raw, &mut info) };
         }
-        let copied = status.min(capped);
-        buf.truncate(copied as usize);
-        if let Err(e) = std::str::from_utf8(&buf) {
-                if e.error_len().is_none() { buf.truncate(e.valid_up_to()); }
+        if raw < 0 {
+                return ProcessResult { status: raw, exit_code: 0, output: String::new(), ok: false, truncated: false };
         }
+        buf.truncate(raw as usize);
         let output = String::from_utf8_lossy(&buf).into_owned();
-        ProcessResult { status: copied, exit_code, output, ok: true, truncated: status > copied }
+        ProcessResult { status: raw, exit_code: info[0], output, ok: true, truncated: info[1] != 0 }
 }
 
 pub struct WorkerResult {

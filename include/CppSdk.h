@@ -32,11 +32,21 @@ namespace fx
 
 struct ProcessResult
 {
-        int32_t status = 0; // bytes written on success, -1 permission denied, -2 error, -3 timeout
+        int32_t status = 0; // bytes written on success, -1 permission denied, -2 error, -3 timeout, -4 running
         int32_t exitCode = 0;
         std::string output;
         bool ok = false;
         bool truncated = false;
+
+        bool isRunning() const
+        {
+                return status == -4;
+        }
+
+        bool isDone() const
+        {
+                return status >= 0;
+        }
 };
 
 struct NativeCtx
@@ -1777,8 +1787,8 @@ extern "C" {
         __attribute__((import_module("cfx"), import_name("remove_ref"))) void __cfxRemoveRef(int32_t ref_idx);
         __attribute__((import_module("cfx"), import_name("invoke_function_reference"))) void __cfxInvokeFunctionReference(const char* ref_str, uint32_t ref_len, const char* args, uint32_t args_len, void* out);
         __attribute__((import_module("cfx"), import_name("get_instance_id"))) int32_t __cfxGetInstanceId();
-        __attribute__((import_module("cfx"), import_name("spawn_process"))) int32_t __cfxSpawnProcess(const char* cmd, uint32_t cmd_len, char* out_buf, int32_t out_buf_max);
-        __attribute__((import_module("cfx"), import_name("get_last_spawn_exit_code"))) int32_t __cfxGetLastSpawnExitCode();
+        __attribute__((import_module("cfx"), import_name("spawn_process"))) int32_t __cfxSpawnProcess(const char* cmd, uint32_t cmd_len);
+        __attribute__((import_module("cfx"), import_name("poll_process"))) int32_t __cfxPollProcess(int32_t process_id, char* out_buf, int32_t out_buf_max, int32_t* info);
         __attribute__((import_module("cfx"), import_name("create_worker"))) int32_t __cfxCreateWorker(const char* fn_name, uint32_t fn_name_len, const char* input, uint32_t input_len);
         __attribute__((import_module("cfx"), import_name("poll_worker"))) int32_t __cfxPollWorker(int32_t worker_id, char* out_buf, int32_t out_buf_max);
         __attribute__((import_module("cfx"), import_name("schedule_bookmark"))) void __cfxScheduleBookmark(int32_t bookmark_id, int32_t deadline_ms);
@@ -3229,23 +3239,30 @@ inline void createCoroutineNow(F&& fn)
 template<typename F>
 inline void createThread(F&& fn) { createCoroutine(std::forward<F>(fn)); }
 
-inline ProcessResult spawnProcess(const std::string& command, int32_t maxOutput = 65536)
+inline int32_t spawnProcess(const std::string& command)
+{
+        return __cfxSpawnProcess(command.c_str(), static_cast<uint32_t>(command.size()));
+}
+
+inline ProcessResult pollProcess(int32_t processId, int32_t maxOutput = 4096)
 {
         ProcessResult result{ };
-        int32_t capped = std::clamp(maxOutput, 0, 1 << 20);
-        std::string buf(static_cast<size_t>(capped) + 1, '\0');
-        int32_t status = __cfxSpawnProcess(command.c_str(), static_cast<uint32_t>(command.size()), buf.data(), capped + 1);
-        result.exitCode = __cfxGetLastSpawnExitCode();
-        if (status < 0)
+        maxOutput = std::clamp<int32_t>(maxOutput, 0, 1 << 20);
+        std::string buf(static_cast<size_t>(maxOutput), '\0');
+        int32_t info[2] = { };
+        int32_t raw = __cfxPollProcess(processId, buf.data(), maxOutput, info);
+        if (raw > maxOutput && raw <= (1 << 20))
         {
-                result.status = status;
-                return result;
+                buf.resize(static_cast<size_t>(raw));
+                raw = __cfxPollProcess(processId, buf.data(), raw, info);
         }
-        int32_t copied = std::min(status, capped);
-        buf.resize(static_cast<size_t>(copied));
+        result.status = raw;
+        if (raw < 0)
+                return result;
+        buf.resize(std::min(static_cast<size_t>(raw), buf.size()));
         result.ok = true;
-        result.truncated = status > copied;
-        result.status = copied;
+        result.exitCode = info[0];
+        result.truncated = info[1] != 0;
         result.output = std::move(buf);
         return result;
 }
@@ -3475,7 +3492,7 @@ static wasm_trap_t* CbCopyBinaryResult(void*, wasmtime_caller_t*, const wasmtime
 static wasm_trap_t* CbCancelEvent(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
 static wasm_trap_t* CbWasEventCanceled(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
 static wasm_trap_t* CbSpawnProcess(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-static wasm_trap_t* CbGetLastSpawnExitCode(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
+static wasm_trap_t* CbPollProcess(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
 static wasm_trap_t* CbCreateRef(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
 static wasm_trap_t* CbCreateWorker(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
 static wasm_trap_t* CbPollWorker(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
@@ -3523,7 +3540,7 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         friend wasm_trap_t* ::CbCancelEvent(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
         friend wasm_trap_t* ::CbWasEventCanceled(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
         friend wasm_trap_t* ::CbSpawnProcess(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-        friend wasm_trap_t* ::CbGetLastSpawnExitCode(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
+        friend wasm_trap_t* ::CbPollProcess(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
         friend wasm_trap_t* ::CbCreateRef(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
         friend wasm_trap_t* ::CbCreateWorker(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
         friend wasm_trap_t* ::CbPollWorker(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
@@ -3604,6 +3621,16 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
 
         static constexpr int32_t MAX_WORKERS_PER_RESOURCE = 8;
 
+        struct ProcessState
+        {
+                std::mutex mutex;
+                bool done = false;
+                fx::ProcessResult result;
+                const WasmModule* owner = nullptr;
+        };
+
+        static constexpr int32_t MAX_PROCESSES_PER_RESOURCE = 8;
+
         void scheduleWasmBookmark(WasmModule& mod, int32_t wasmId, int32_t deadlineMs);
         static wasm_engine_t* engine();
 
@@ -3619,6 +3646,8 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         WasmModule* m_activeModule = nullptr;
         std::unordered_map<int32_t, std::shared_ptr<WorkerState>> m_workers;
         int32_t m_nextWorkerId = 1;
+        std::unordered_map<int32_t, std::shared_ptr<ProcessState>> m_processes;
+        int32_t m_nextProcessId = 1;
         std::unordered_map<int32_t, fx::RefCallback> m_refs;
         int32_t m_nextRefIdx = 1;
         int32_t allocRefIdx();
@@ -3708,7 +3737,6 @@ struct WasmModule : std::enable_shared_from_this<WasmModule>
         bool hasValidNativeResult = false;
         fxNativeContext lastNativeCtx{ };
         uint32_t lastResultPtrMask = 0;
-        int32_t lastSpawnExitCode = 0;
         std::unordered_map<int32_t, uint64_t> wasmToHostBookmark;
 
         uint8_t* wasmBase();
