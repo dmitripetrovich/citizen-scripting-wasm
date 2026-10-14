@@ -1075,30 +1075,41 @@ static void RunWorker(std::shared_ptr<WasmScriptRuntime::WorkerState> state, was
                 finalize(WasmScriptRuntime::WorkerState::Error);
                 return;
         }
+        if (!hasMem || !hasAlloc)
+        {
+                LogError("Worker '%s' in '%s' needs the module to export memory and __cfx_alloc", fnName.c_str(), state->resourceName.c_str());
+                finalize(WasmScriptRuntime::WorkerState::Error);
+                return;
+        }
         auto workerAlloc = [&](uint32_t size) -> uint32_t
         {
-                if (!hasAlloc)
-                        return 0;
                 wasmtime_val_t allocArgs[1] = { I32Val(static_cast<int32_t>(size)) };
                 wasmtime_val_t allocResult[1]{ };
                 if (!WasmCall(store, allocExt.of.func, allocArgs, 1, allocResult, 1, "worker", "__cfx_alloc"))
                         return 0;
-                return static_cast<uint32_t>(allocResult[0].of.i32);
+                uint32_t ptr = static_cast<uint32_t>(allocResult[0].of.i32);
+                return InBounds(wasmtime_memory_data_size(storeCtx, &memExt.of.memory), ptr, size) ? ptr : 0;
         };
         uint32_t inputPtr = 0;
         if (!inputData.empty())
         {
                 inputPtr = workerAlloc(static_cast<uint32_t>(inputData.size()));
-                if (inputPtr && hasMem)
+                if (!inputPtr)
                 {
-                        uint8_t* wbase = wasmtime_memory_data(storeCtx, &memExt.of.memory);
-                        size_t wsz = wasmtime_memory_data_size(storeCtx, &memExt.of.memory);
-                        if (InBounds(wsz, inputPtr, inputData.size()))
-                                memcpy(wbase + inputPtr, inputData.data(), inputData.size());
+                        LogError("Worker '%s' in '%s' failed to allocate %zu bytes of input", fnName.c_str(), state->resourceName.c_str(), inputData.size());
+                        finalize(WasmScriptRuntime::WorkerState::Error);
+                        return;
                 }
+                memcpy(wasmtime_memory_data(storeCtx, &memExt.of.memory) + inputPtr, inputData.data(), inputData.size());
         }
         constexpr uint32_t resultBufSize = RESULT_BUF_SIZE;
         uint32_t resultPtr = workerAlloc(resultBufSize);
+        if (!resultPtr)
+        {
+                LogError("Worker '%s' in '%s' failed to allocate its result buffer", fnName.c_str(), state->resourceName.c_str());
+                finalize(WasmScriptRuntime::WorkerState::Error);
+                return;
+        }
         wasmtime_val_t callArgs[4] = {
                 I32Val(static_cast<int32_t>(inputPtr)),
                 I32Val(static_cast<int32_t>(inputData.size())),
@@ -1120,7 +1131,7 @@ static void RunWorker(std::shared_ptr<WasmScriptRuntime::WorkerState> state, was
                 resultLen = static_cast<int32_t>(resultBufSize);
         {
                 std::lock_guard<std::mutex> lk(state->mutex);
-                if (resultLen > 0 && hasMem)
+                if (resultLen > 0)
                 {
                         uint8_t* wbase = wasmtime_memory_data(storeCtx, &memExt.of.memory);
                         size_t wsz = wasmtime_memory_data_size(storeCtx, &memExt.of.memory);
