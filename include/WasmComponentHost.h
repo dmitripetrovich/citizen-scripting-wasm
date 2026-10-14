@@ -14,6 +14,7 @@ typedef uint32_t result_t;
 #define FX_E_NOTIMPL 0x80004001
 #define FX_E_NOINTERFACE 0x80004002
 #define FX_E_INVALIDARG 0x80070057
+#define FX_E_OUTOFMEMORY 0x8007000E
 
 #define FX_SUCCEEDED(x) (((x) & 0x80000000) == 0)
 #define FX_FAILED(x) (!FX_SUCCEEDED(x))
@@ -281,6 +282,8 @@ template<typename TClass, typename... TArg>
 inline OMPtr<TClass> MakeNew(TArg&&... args)
 {
         void* mem = fwAlloc(sizeof(TClass));
+        if (!mem)
+                return { };
         TClass* inst;
         try
         {
@@ -299,6 +302,8 @@ template<typename TClass, typename... TArg>
 inline fxIBase* MakeNewBase(TArg&&... args)
 {
         void* mem = fwAlloc(sizeof(TClass));
+        if (!mem)
+                return nullptr;
         TClass* inst;
         try
         {
@@ -922,6 +927,8 @@ public:
                         if (f->guid == match)
                         {
                                 fxIBase* base = f->factory();
+                                if (!base)
+                                        return FX_E_OUTOFMEMORY;
                                 result_t res = base->QueryInterface(iid, outRef);
                                 base->Release();
                                 if (res != FX_E_NOINTERFACE)

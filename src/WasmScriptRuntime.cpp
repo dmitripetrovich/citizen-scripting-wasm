@@ -2138,6 +2138,8 @@ result_t OM_DECL WasmScriptRuntime::CallRef(int32_t refIdx, char* argsSerialized
                 result = std::vector<char>{ static_cast<char>(MSGPACK_EMPTY_ARRAY) };
         }
         auto buf = fx::MakeNew<ScriptBuffer>(std::move(result));
+        if (!buf)
+                return FX_E_OUTOFMEMORY;
         return buf->QueryInterface(IScriptBuffer::GetIID(), reinterpret_cast<void**>(retval));
 }
 
