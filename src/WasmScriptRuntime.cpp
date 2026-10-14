@@ -2572,7 +2572,31 @@ static std::string ensureRustRlib(const std::string& sdkPath)
         return rlib;
 }
 
-static bool compileRust(const std::string& rsPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& resourceName)
+static std::string RealPath(const std::string& path)
+{
+        char* real = realpath(path.c_str(), nullptr);
+        if (!real)
+                return { };
+        std::string out = real;
+        free(real);
+        return out;
+}
+
+static bool DepsInside(const std::vector<std::string>& deps, const std::string& root, const std::string& sdkPath, const std::string& source, const std::string& resourceName)
+{
+        std::string sdkRoot = RealPath(sdkPath);
+        for (const auto& dep : deps)
+        {
+                std::string real = RealPath(dep);
+                if (!real.empty() && (real.starts_with(root + "/") || (!sdkRoot.empty() && real.starts_with(sdkRoot + "/"))))
+                        continue;
+                LogError("'%s' in resource '%s' reads '%s' at compile time, only files inside the resource can be used", source.c_str(), resourceName.c_str(), dep.c_str());
+                return false;
+        }
+        return true;
+}
+
+static bool compileRust(const std::string& rsPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& resourceName, const std::string& root)
 {
         std::string rlib = ensureRustRlib(sdkPath);
         if (rlib.empty())
@@ -2587,6 +2611,14 @@ static bool compileRust(const std::string& rsPath, const std::string& wasmPath, 
         if (processFailed(result, reason))
         {
                 LogError("Failed to compile '%s' in resource '%s' (%s):\n%s", rsPath.c_str(), resourceName.c_str(), reason.c_str(), result.output.c_str());
+                return false;
+        }
+        std::string depInfo;
+        std::vector<std::string> deps;
+        if (!readTextFile(wasmPath + ".d", depInfo) || !parseDepRule(depInfo, deps) || !DepsInside(deps, root, sdkPath, rsPath, resourceName))
+        {
+                unlink(wasmPath.c_str());
+                unlink((wasmPath + ".d").c_str());
                 return false;
         }
         if (!result.output.empty())
@@ -2725,7 +2757,10 @@ static std::string escapeDep(const std::string& path)
 
 static bool scanCppDeps(const std::string& cppPath, const std::string& depFile, const std::string& sdkPath, const std::string& resourceName, std::vector<std::string>& deps)
 {
-        auto result = fx::spawnProgram({ "zig", "c++", "-target", "wasm32-wasi", "-std=c++23", "-fno-exceptions", "-I" + sdkPath, "-MM", "-MF", depFile, cppPath }, 1048576, 60000);
+        std::vector<std::string> args{ "zig", "c++" };
+        args.insert(args.end(), g_cppFlags.begin(), g_cppFlags.end());
+        args.insert(args.end(), { "-I" + sdkPath, "-MM", "-MF", depFile, cppPath });
+        auto result = fx::spawnProgram(args, 1048576, 60000);
         std::string reason;
         if (processFailed(result, reason))
         {
@@ -2806,7 +2841,7 @@ static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, 
         for (size_t i = 0; i < sources.size(); ++i)
         {
                 std::vector<std::string> deps;
-                if (!scanCppDeps(sources[i], wasmPath + ".d.tmp", sdkPath, resourceName, deps))
+                if (!scanCppDeps(sources[i], wasmPath + ".d.tmp", sdkPath, resourceName, deps) || !DepsInside(deps, root, sdkPath, sources[i], resourceName))
                         return false;
                 for (const auto& dep : deps)
                 {
@@ -2814,13 +2849,8 @@ static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, 
                                 allDeps.push_back(dep);
                         if (!dep.ends_with(".h") && !dep.ends_with(".hpp") && !dep.ends_with(".hh") && !dep.ends_with(".hxx"))
                                 continue;
-                        std::string candidate = dep.substr(0, dep.rfind('.')) + ".cpp";
-                        char* real = realpath(candidate.c_str(), nullptr);
-                        if (!real)
-                                continue;
-                        std::string helper = real;
-                        free(real);
-                        if (!helper.starts_with(root + "/") || seenSources.count(helper))
+                        std::string helper = RealPath(dep.substr(0, dep.rfind('.')) + ".cpp");
+                        if (helper.empty() || !helper.starts_with(root + "/") || seenSources.count(helper))
                                 continue;
                         std::vector<uint8_t> source;
                         if (!ReadFileBytes(helper, root, source) || HasCppEntry(source))
@@ -2865,7 +2895,7 @@ static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, 
 
 static bool compileResource(const std::string& sourcePath, const std::string& wasmFile, const std::string& sdkPath, const std::string& resourceName, const std::string& root, bool rust)
 {
-        bool ok = rust ? compileRust(sourcePath, wasmFile, sdkPath, resourceName) : compileCpp(sourcePath, wasmFile, sdkPath, resourceName, root);
+        bool ok = rust ? compileRust(sourcePath, wasmFile, sdkPath, resourceName, root) : compileCpp(sourcePath, wasmFile, sdkPath, resourceName, root);
         if (ok)
                 writeBuildStamp(wasmFile, rust);
         return ok;
