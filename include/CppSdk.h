@@ -3412,7 +3412,8 @@ int32_t __cfxInvokeRef(int32_t callback_id, const uint8_t* args_ptr, uint32_t ar
                 auto it = callbacks.find(callback_id);
                 if (it == callbacks.end())
                         return 0;
-                result = it->second(args_ptr, args_len);
+                auto callback = it->second;
+                result = callback(args_ptr, args_len);
         }
         uint32_t copy = std::min<uint32_t>(static_cast<uint32_t>(result.size()), result_max);
         if (copy > 0 && result_ptr)

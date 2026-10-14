@@ -2021,12 +2021,13 @@ result_t OM_DECL WasmScriptRuntime::CallRef(int32_t refIdx, char* argsSerialized
         auto it = m_refs.find(refIdx);
         if (it == m_refs.end())
                 return FX_E_INVALIDARG;
+        fx::RefCallback callback = it->second;
         fx::PushEnvironment env(static_cast<IScriptRuntime*>(this));
         BoundaryGuard boundary(m_host.GetRef(), static_cast<int64_t>(nextBoundaryId()));
         std::vector<char> result;
         try
         {
-                result = it->second(argsSerialized, argsSize);
+                result = callback(argsSerialized, argsSize);
         }
         catch (const std::exception& e)
         {

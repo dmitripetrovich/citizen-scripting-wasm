@@ -500,7 +500,7 @@ impl_typed_event_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6, H 7, I 8);
 impl_typed_event_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6, H 7, I 8, J 9);
 impl_typed_event_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6, H 7, I 8, J 9, K 10);
 impl_typed_event_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6, H 7, I 8, J 9, K 10, L 11);
-type RefCallbackFn = Box<dyn Fn(&[u8]) -> Vec<u8>>;
+type RefCallbackFn = Rc<dyn Fn(&[u8]) -> Vec<u8>>;
 
 struct EventHandlerEntry {
         id: i32,
@@ -956,7 +956,7 @@ pub fn add_export(name: &str, handler: impl Fn(&EventArgs) -> Value + 'static) {
         let handler = std::rc::Rc::new(handler);
         let export_ref = {
                 let handler = handler.clone();
-                let (s, _) = create_canonical_ref(Box::new(move |args_data: &[u8]| -> Vec<u8> {
+                let (s, _) = create_canonical_ref(Rc::new(move |args_data: &[u8]| -> Vec<u8> {
                         let decoded = ensure_array(decode(args_data));
                         let ea = EventArgs::new(decoded);
                         let result = handler(&ea);
@@ -1021,7 +1021,7 @@ pub fn call_export_async(resource: &str, name: &str, args: &[Value], callback: i
                                 let async_ref = async_ref.clone();
                                 let shared_cb = std::rc::Rc::new(std::cell::RefCell::new(Some(callback)));
                                 let shared_cb2 = shared_cb.clone();
-                                let (cb_ref_str, _cb_ref_idx) = create_canonical_ref(Box::new(move |data: &[u8]| -> Vec<u8> {
+                                let (cb_ref_str, _cb_ref_idx) = create_canonical_ref(Rc::new(move |data: &[u8]| -> Vec<u8> {
                                         let decoded = ensure_array(decode(data));
                                         let val = match &decoded {
                                                 Value::Array(a) if !a.is_empty() => a[0].clone(),
@@ -1046,7 +1046,7 @@ pub fn call_export_async(resource: &str, name: &str, args: &[Value], callback: i
 fn resolve_export_ref(resource: &str, name: &str) -> String {
         let captured = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
         let captured2 = captured.clone();
-        let (setter_ref_str, setter_ref_idx) = create_canonical_ref(Box::new(move |data: &[u8]| -> Vec<u8> {
+        let (setter_ref_str, setter_ref_idx) = create_canonical_ref(Rc::new(move |data: &[u8]| -> Vec<u8> {
                 let decoded = decode(data);
                 let s = match &decoded {
                         Value::FuncRef(s) => s.clone(),
@@ -1075,7 +1075,7 @@ pub fn on_command(command: &str, handler: impl Fn(&str, &[String]) + 'static) {
         handlers.push(Rc::new(handler));
         if handlers.len() > 1 { return; }
         let cmd2 = cmd.clone();
-        let (cb_ref, _) = create_canonical_ref(Box::new(move |args_data: &[u8]| -> Vec<u8> {
+        let (cb_ref, _) = create_canonical_ref(Rc::new(move |args_data: &[u8]| -> Vec<u8> {
                 let decoded = ensure_array(decode(args_data));
                 let source = if decoded.len() > 0 { decoded.at(0).as_int().to_string() } else { "0".to_string() };
                 let mut cmd_args = Vec::new();
@@ -1099,7 +1099,7 @@ pub fn on_command(command: &str, handler: impl Fn(&str, &[String]) + 'static) {
 
 pub fn add_state_bag_change_handler(key_filter: &str, bag_filter: &str, handler: impl Fn(&str, &str, &Value, i32, bool) + 'static) -> i32 {
         let handler = std::rc::Rc::new(handler);
-        let (cb_ref, ref_idx) = create_canonical_ref(Box::new(move |args_data: &[u8]| -> Vec<u8> {
+        let (cb_ref, ref_idx) = create_canonical_ref(Rc::new(move |args_data: &[u8]| -> Vec<u8> {
                 let decoded = ensure_array(decode(args_data));
                 if decoded.len() >= 5 {
                         let bag = decoded.at(0).as_str();
@@ -1943,9 +1943,9 @@ pub mod runtime {
                 let result = match unsafe { (*c).pending_ref_result.take() } {
                         Some((id, data)) if id == callback_id && data.len() as u32 <= result_max => data,
                         _ => {
-                                let cb = match unsafe { (*c).ref_callbacks.get(&callback_id) } { Some(cb) => cb as *const RefCallbackFn, None => return 0 };
+                                let cb = match unsafe { (*c).ref_callbacks.get(&callback_id) } { Some(cb) => Rc::clone(cb), None => return 0 };
                                 let args = unsafe { std::slice::from_raw_parts(args_ptr, args_len as usize) };
-                                unsafe { (*cb)(args) }
+                                cb(args)
                         }
                 };
                 let copy = (result.len() as u32).min(result_max);
