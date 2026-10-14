@@ -485,10 +485,21 @@ static wasm_trap_t* CbCopyBinaryResult(void* env, wasmtime_caller_t* caller, con
         static constexpr size_t MAX_BINARY_RESULT = 1u << 24;
         size_t dataSize = static_cast<size_t>(mod->lastNativeCtx.arguments[sizeIdx]);
         if (dataSize > MAX_BINARY_RESULT)
-                dataSize = MAX_BINARY_RESULT;
+        {
+                LogWarning("Dropping a %zu byte native result in '%s', the limit is %zu bytes", dataSize, mod->rt->resourceName().c_str(), MAX_BINARY_RESULT);
+                results[0] = I32Val(0);
+                return nullptr;
+        }
         size_t copy = (bufMax > 0) ? std::min<size_t>(dataSize, static_cast<size_t>(bufMax)) : 0;
-        if (copy && mem.check(bufPtr, copy))
+        if (copy)
+        {
+                if (!mem.check(bufPtr, copy))
+                {
+                        results[0] = I32Val(0);
+                        return nullptr;
+                }
                 memcpy(mem.base + bufPtr, data, copy);
+        }
         results[0] = I32Val(static_cast<int32_t>(dataSize));
         return nullptr;
 }
