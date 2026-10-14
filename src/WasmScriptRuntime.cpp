@@ -1781,25 +1781,18 @@ bool WasmScriptRuntime::callInvokeRef(WasmModule& mod, uint32_t callbackId, cons
                 actualLen = ret2.of.i32;
         }
         mod.wasmFree(argsPtr, argsAllocSz);
-        if (actualLen > 0)
+        if (actualLen > 0 && static_cast<uint32_t>(actualLen) > resultBufMax)
+                LogWarning("Dropping a %d byte ref result in '%s', the limit is %u bytes", actualLen, m_resourceName.c_str(), MAX_REF_RESULT_SIZE);
+        else if (actualLen > 0)
         {
-                uint32_t copyLen = std::min(static_cast<uint32_t>(actualLen), resultBufMax);
-                if (static_cast<uint32_t>(actualLen) > resultBufMax)
-                        LogWarning("ref result truncated in '%s' (%d > %u, cap %u)", m_resourceName.c_str(), actualLen, resultBufMax, MAX_REF_RESULT_SIZE);
                 base = mod.wasmBase();
                 memSz = mod.wasmMemSize();
-                if (InBounds(memSz, resultPtr, copyLen))
-                {
-                        result.resize(copyLen);
-                        memcpy(result.data(), base + resultPtr, copyLen);
-                }
-                mod.wasmFree(resultPtr, resultBufMax);
+                if (InBounds(memSz, resultPtr, static_cast<uint32_t>(actualLen)))
+                        result.assign(reinterpret_cast<char*>(base + resultPtr), reinterpret_cast<char*>(base + resultPtr) + actualLen);
         }
-        else
-        {
-                mod.wasmFree(resultPtr, resultBufMax);
+        mod.wasmFree(resultPtr, resultBufMax);
+        if (result.empty())
                 result = std::vector<char>{ static_cast<char>(MSGPACK_EMPTY_ARRAY) };
-        }
         return true;
 }
 
