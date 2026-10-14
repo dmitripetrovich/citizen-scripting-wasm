@@ -784,11 +784,12 @@ pub fn remove_event_handler(token: i32) {
         }
 }
 
-pub fn emit(event: &str, args: &[Value]) {
+pub fn emit(event: &str, args: &[Value]) -> bool {
         let buf = encode_args(args);
         unsafe {
                 __cfx_emit_event(event.as_ptr(), event.len() as u32, buf.as_ptr(), buf.len() as u32);
         }
+        invoke_native_bool(hash_string(b"WAS_EVENT_CANCELED"), &[])
 }
 
 pub fn emit_net(event: &str, target: i32, args: &[Value]) {

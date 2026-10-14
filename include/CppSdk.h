@@ -2361,10 +2361,11 @@ inline void removeEventHandler(int32_t token)
 }
 
 template<typename... TArgs>
-inline void emit(const std::string& event, TArgs&&... vals)
+inline bool emit(const std::string& event, TArgs&&... vals)
 {
         auto buf = fxw_internal::encodeArgs(std::forward<TArgs>(vals)...);
         __cfxEmitEvent(event.c_str(), static_cast<uint32_t>(event.size()), buf.data(), static_cast<uint32_t>(buf.size()));
+        return invokeNative(HashString("WAS_EVENT_CANCELED"), { }, 1).args[0] != 0;
 }
 
 template<typename... TArgs>
