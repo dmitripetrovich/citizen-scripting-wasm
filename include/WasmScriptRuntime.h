@@ -240,7 +240,7 @@ struct WasmModule : std::enable_shared_from_this<WasmModule>
         bool hasTickBookmarksFn = false;
         bool hasValidNativeResult = false;
         fxNativeContext lastNativeCtx{ };
-        uint32_t lastResultPtrMask = 0;
+        std::string_view lastResultKinds;
         int32_t callDepth = 0;
         bool limitExceeded = false;
         std::string lastNativeError;

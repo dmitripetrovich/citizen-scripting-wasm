@@ -544,7 +544,7 @@ static wasm_trap_t* CbInvokeNative(void* env, wasmtime_caller_t* caller, const w
                 std::fill(std::begin(hostCtx.arguments), std::end(hostCtx.arguments), 0);
         }
         mod->lastNativeCtx = hostCtx;
-        mod->lastResultPtrMask = 0;
+        mod->lastResultKinds = resultKinds;
         mod->hasValidNativeResult = true;
         size_t numResults = std::max<size_t>(std::min<uint32_t>(wctx.numResults, 32), resultKinds.size());
         for (size_t i = 0; i < numResults; ++i)
@@ -552,10 +552,7 @@ static wasm_trap_t* CbInvokeNative(void* env, wasmtime_caller_t* caller, const w
                 uint64_t value = hostCtx.arguments[i];
                 char kind = i < resultKinds.size() ? resultKinds[i] : '\0';
                 if (IsPointerKind(kind))
-                {
-                        mod->lastResultPtrMask |= 1u << i;
                         wctx.args[i] = value != 0 ? 1 : 0;
-                }
                 else if (kind == 'l')
                         wctx.args[i] = value;
                 else if (kind == 'i')
@@ -601,7 +598,7 @@ static wasm_trap_t* CbCopyStringResult(void* env, wasmtime_caller_t* caller, con
         int32_t resultIdx = args[1].of.i32;
         uint32_t bufPtr = ArgU32(args[2]);
         int32_t bufMax = args[3].of.i32;
-        if (resultIdx < 0 || resultIdx >= 32 || !((mod->lastResultPtrMask >> resultIdx) & 1u))
+        if (resultIdx < 0 || static_cast<size_t>(resultIdx) >= mod->lastResultKinds.size() || mod->lastResultKinds[resultIdx] != 's')
         {
                 results[0] = I32Val(0);
                 return nullptr;
@@ -636,7 +633,7 @@ static wasm_trap_t* CbCopyBinaryResult(void* env, wasmtime_caller_t* caller, con
         int32_t sizeIdx = args[2].of.i32;
         uint32_t bufPtr = ArgU32(args[3]);
         int32_t bufMax = args[4].of.i32;
-        if (ptrIdx < 0 || ptrIdx >= 32 || sizeIdx < 0 || sizeIdx >= 32 || !((mod->lastResultPtrMask >> ptrIdx) & 1u) || ((mod->lastResultPtrMask >> sizeIdx) & 1u))
+        if (ptrIdx < 0 || static_cast<size_t>(ptrIdx) + 1 >= mod->lastResultKinds.size() || sizeIdx != ptrIdx + 1 || mod->lastResultKinds[ptrIdx] != 'b')
         {
                 results[0] = I32Val(0);
                 return nullptr;
