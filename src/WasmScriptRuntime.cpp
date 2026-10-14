@@ -64,20 +64,56 @@ static std::string GetConvar(IScriptHost* host, const char* name, const char* de
         return result ? std::string(result) : std::string(defaultValue);
 }
 
+using CoreTraceFn = void (*)(const char* channel, const char* func, const char* file, int line, const char* string);
+
+static CoreTraceFn GetCoreTrace()
+{
+        static CoreTraceFn s_fn = reinterpret_cast<CoreTraceFn>(dlsym(RTLD_DEFAULT, "CoreTrace"));
+        return s_fn;
+}
+
+static void ConsolePrint(const std::string& channel, std::string text)
+{
+        if (text.empty() || text.back() != '\n')
+                text.push_back('\n');
+        if (auto* coreTrace = GetCoreTrace())
+        {
+                coreTrace(channel.c_str(), "", "", 0, text.c_str());
+                return;
+        }
+        flockfile(stderr);
+        fprintf(stderr, "[%s] %s", channel.c_str(), text.c_str());
+        funlockfile(stderr);
+}
+
+static void ScriptPrint(IScriptHost* host, const std::string& resourceName, std::string msg)
+{
+        if (host)
+                host->ScriptTrace(msg.data());
+        ConsolePrint("script:" + resourceName, std::move(msg));
+}
+
 enum class LogLevel { Info, Warning, Error };
 
 __attribute__((format(printf, 2, 3)))
 static void Log(LogLevel level, const char* fmt, ...)
 {
-        va_list ap;
+        va_list ap, aq;
         va_start(ap, fmt);
-        const char* color = level == LogLevel::Error ? "\033[31m" : level == LogLevel::Warning ? "\033[33m" : "\033[36m";
-        flockfile(stderr);
-        fprintf(stderr, "%s[citizen-scripting-wasm]\033[0m ", color);
-        vfprintf(stderr, fmt, ap);
-        fputc('\n', stderr);
-        funlockfile(stderr);
+        va_copy(aq, ap);
+        int len = vsnprintf(nullptr, 0, fmt, aq);
+        va_end(aq);
+        std::string msg(len > 0 ? static_cast<size_t>(len) : 0, '\0');
+        if (len > 0)
+                vsnprintf(msg.data(), msg.size() + 1, fmt, ap);
         va_end(ap);
+        while (!msg.empty() && msg.back() == '\n')
+                msg.pop_back();
+        if (level == LogLevel::Error)
+                msg = "^1" + msg + "^7";
+        else if (level == LogLevel::Warning)
+                msg = "^3" + msg + "^7";
+        ConsolePrint("citizen-scripting-wasm", std::move(msg));
 }
 
 #define LogInfo(...) Log(LogLevel::Info, __VA_ARGS__)
@@ -312,11 +348,8 @@ static wasm_trap_t* CbTrace(void* env, wasmtime_caller_t* caller, const wasmtime
                 return nullptr;
         std::string msg = mem.readStr(ptr, len);
         SanitizeTraceMsg(msg);
-        if (rt->host())
-                rt->host()->ScriptTrace(Mut(msg));
-        fprintf(stderr, "\033[36m[script:%s]\033[0m %s", rt->resourceName().c_str(), msg.c_str());
-        if (!msg.empty() && msg.back() != '\n')
-                fputc('\n', stderr);
+        if (!msg.empty())
+                ScriptPrint(rt->host(), rt->resourceName(), std::move(msg));
         return nullptr;
 }
 
@@ -967,9 +1000,8 @@ static wasm_trap_t* CbWorkerTrace(void* env, wasmtime_caller_t* caller, const wa
         SanitizeTraceMsg(msg);
         auto* state = static_cast<WasmScriptRuntime::WorkerState*>(env);
         const char* resName = (state && !state->resourceName.empty()) ? state->resourceName.c_str() : "?";
-        fprintf(stderr, "\033[36m[worker:%s]\033[0m %s", resName, msg.c_str());
-        if (!msg.empty() && msg.back() != '\n')
-                fputc('\n', stderr);
+        if (!msg.empty())
+                ConsolePrint(std::string("worker:") + resName, std::move(msg));
         return nullptr;
 }
 
@@ -1865,11 +1897,8 @@ result_t OM_DECL WasmScriptRuntime::Tick()
                                 continue;
                 }
                 BoundaryGuard boundary(m_host.GetRef(), static_cast<int64_t>(nextBoundaryId()));
-                if (!mod->callVoid(mod->fnTick) && m_host.GetRef())
-                {
-                        std::string msg = "^1SCRIPT ERROR: @" + m_resourceName + "/" + mod->scriptFile + ": WASM trap in tick handler^7\n";
-                        m_host->ScriptTrace(Mut(msg));
-                }
+                if (!mod->callVoid(mod->fnTick))
+                        ScriptPrint(m_host.GetRef(), m_resourceName, "^1SCRIPT ERROR: @" + m_resourceName + "/" + mod->scriptFile + ": WASM trap in tick handler^7");
         }
         return FX_S_OK;
 }
@@ -1973,11 +2002,8 @@ result_t OM_DECL WasmScriptRuntime::TriggerEvent(char* eventName, char* argsSeri
                 memcpy(base + srcWasm, src.data(), src.size());
                 base[srcWasm + src.size()] = '\0';
                 bool eventOk = mod->callEvent(nameWasm, static_cast<uint32_t>(name.size()), argsWasm, serializedSize, srcWasm, static_cast<uint32_t>(src.size()));
-                if (!eventOk && m_host.GetRef())
-                {
-                        std::string msg = "^1SCRIPT ERROR: @" + m_resourceName + "/" + mod->scriptFile + ": WASM trap in event '" + eventName + "'^7\n";
-                        m_host->ScriptTrace(Mut(msg));
-                }
+                if (!eventOk)
+                        ScriptPrint(m_host.GetRef(), m_resourceName, "^1SCRIPT ERROR: @" + m_resourceName + "/" + mod->scriptFile + ": WASM trap in event '" + eventName + "'^7");
                 mod->wasmFree(block, totalSz);
         }
         return FX_S_OK;
@@ -1997,16 +2023,12 @@ result_t OM_DECL WasmScriptRuntime::CallRef(int32_t refIdx, char* argsSerialized
         }
         catch (const std::exception& e)
         {
-                std::string msg = "^1SCRIPT ERROR: @" + m_resourceName + ": Unhandled exception in ref " + std::to_string(refIdx) + ": " + e.what() + "^7\n";
-                if (m_host.GetRef())
-                        m_host->ScriptTrace(Mut(msg));
+                ScriptPrint(m_host.GetRef(), m_resourceName, "^1SCRIPT ERROR: @" + m_resourceName + ": Unhandled exception in ref " + std::to_string(refIdx) + ": " + e.what() + "^7");
                 result = std::vector<char>{ static_cast<char>(MSGPACK_EMPTY_ARRAY) };
         }
         catch (...)
         {
-                std::string msg = "^1SCRIPT ERROR: @" + m_resourceName + ": Unhandled non-standard exception in ref " + std::to_string(refIdx) + "^7\n";
-                if (m_host.GetRef())
-                        m_host->ScriptTrace(Mut(msg));
+                ScriptPrint(m_host.GetRef(), m_resourceName, "^1SCRIPT ERROR: @" + m_resourceName + ": Unhandled non-standard exception in ref " + std::to_string(refIdx) + "^7");
                 result = std::vector<char>{ static_cast<char>(MSGPACK_EMPTY_ARRAY) };
         }
         auto buf = fx::MakeNew<ScriptBuffer>(std::move(result));
@@ -2862,10 +2884,7 @@ result_t OM_DECL WasmScriptRuntime::EmitWarning(char* channel, char* message)
         if (message)
         {
                 const char* ch = channel ? channel : "script";
-                std::string msg = std::string("[warning:") + ch + "] " + message + "\n";
-                if (m_host.GetRef())
-                        m_host->ScriptTrace(Mut(msg));
-                LogWarning("[script:%s] %s", m_resourceName.c_str(), msg.c_str());
+                ScriptPrint(m_host.GetRef(), m_resourceName, std::string("^3[warning:") + ch + "] " + message + "^7");
         }
         return FX_S_OK;
 }
