@@ -391,8 +391,15 @@ static wasm_trap_t* CbInvokeNative(void* env, wasmtime_caller_t* caller, const w
                         hostCtx.arguments[i] = static_cast<uintptr_t>(wctx.args[i]);
                 }
         }
-        if (rt->host())
-                rt->host()->InvokeNative(hostCtx);
+        if (rt->host() && FX_FAILED(rt->host()->InvokeNative(hostCtx)))
+        {
+                char* errorText = nullptr;
+                rt->host()->GetLastErrorText(&errorText);
+                char hash[19];
+                snprintf(hash, sizeof(hash), "0x%016llx", static_cast<unsigned long long>(wctx.hash));
+                ScriptPrint(rt->host(), rt->resourceName(), "^1SCRIPT ERROR: @" + rt->resourceName() + "/" + mod->scriptFile + ": native " + hash + " failed: " + (errorText && *errorText ? errorText : "unknown error") + "^7");
+                std::fill(std::begin(hostCtx.arguments), std::end(hostCtx.arguments), 0);
+        }
         mod->lastNativeCtx = hostCtx;
         uint32_t validResultMask = (wctx.numResults >= 32) ? 0xFFFFFFFFu : ((1u << wctx.numResults) - 1);
         mod->lastResultPtrMask = wctx.resultPtrMask & validResultMask;
