@@ -3687,6 +3687,13 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
                 std::atomic<bool> done{ false };
                 std::atomic<bool> cancelled{ false };
                 std::shared_ptr<CompileJob> successor;
+                wasmtime_module_t* module = nullptr;
+
+                ~CompileJob()
+                {
+                        if (module)
+                                wasmtime_module_delete(module);
+                }
         };
 
     private:
@@ -3704,7 +3711,7 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         bool resolveExports(WasmModule& mod);
         void destroyModule(WasmModule& mod);
         void destroyWorkers();
-        result_t loadWasm(const std::vector<uint8_t>& wasmBytes, const std::string& scriptFile, const std::string& sourcePath);
+        result_t loadWasm(wasmtime_module_t* module, const std::string& scriptFile, const std::string& sourcePath);
 };
 
 struct WasmModule : std::enable_shared_from_this<WasmModule>

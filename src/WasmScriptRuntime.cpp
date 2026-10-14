@@ -1416,6 +1416,8 @@ wasm_engine_t* WasmScriptRuntime::engine()
                 wasm_config_t* config = wasm_config_new();
                 wasmtime_config_consume_fuel_set(config, true);
                 wasmtime_config_epoch_interruption_set(config, true);
+                if (auto* err = wasmtime_config_cache_config_load(config, nullptr))
+                        LogWarning("Wasmtime compilation cache is unavailable: %s", ExtractWasmError(err, nullptr).c_str());
                 wasm_engine_t* eng = wasm_engine_new_with_config(config);
                 std::thread([eng]
                 {
@@ -1776,10 +1778,11 @@ void WasmScriptRuntime::destroyModule(WasmModule& mod)
         mod.hasTickBookmarksFn = false;
 }
 
-result_t WasmScriptRuntime::loadWasm(const std::vector<uint8_t>& wasmBytes, const std::string& scriptFile, const std::string& sourcePath)
+result_t WasmScriptRuntime::loadWasm(wasmtime_module_t* module, const std::string& scriptFile, const std::string& sourcePath)
 {
         auto mod = std::make_shared<WasmModule>();
         mod->rt = this;
+        mod->module = module;
         mod->scriptFile = scriptFile;
         mod->store = wasmtime_store_new(engine(), mod.get(), nullptr);
         wasmtime_store_limiter(mod->store, WASM_MEMORY_LIMIT, -1, -1, -1, -1);
@@ -1796,15 +1799,6 @@ result_t WasmScriptRuntime::loadWasm(const std::vector<uint8_t>& wasmBytes, cons
         }
         defineImports(*mod);
         mod->resetLimits();
-        {
-                wasmtime_error_t* err = wasmtime_module_new(engine(), wasmBytes.data(), wasmBytes.size(), &mod->module);
-                if (err)
-                {
-                        LogError("Compile error in '%s': %s", sourcePath.c_str(), ExtractWasmError(err, nullptr).c_str());
-                        destroyModule(*mod);
-                        return FX_E_INVALIDARG;
-                }
-        }
         {
                 wasm_trap_t* trap = nullptr;
                 auto* err = wasmtime_linker_instantiate(mod->linker, wasmtime_store_context(mod->store), mod->module, &mod->instance, &trap);
@@ -2466,6 +2460,23 @@ static bool ReadFileBytes(const std::string& path, const std::string& resolvedRo
         return ok;
 }
 
+static wasmtime_module_t* CompileWasmFile(const std::string& path, const std::string& root)
+{
+        std::vector<uint8_t> bytes;
+        if (!ReadFileBytes(path, root, bytes))
+        {
+                LogError("Failed to read '%s'", path.c_str());
+                return nullptr;
+        }
+        wasmtime_module_t* module = nullptr;
+        if (auto* err = wasmtime_module_new(WasmScriptRuntime::engine(), bytes.data(), bytes.size(), &module))
+        {
+                LogError("Compile error in '%s': %s", path.c_str(), ExtractWasmError(err, nullptr).c_str());
+                return nullptr;
+        }
+        return module;
+}
+
 static std::mutex g_compileJobsMutex;
 static std::unordered_map<std::string, std::shared_ptr<WasmScriptRuntime::CompileJob>> g_compileJobs;
 
@@ -2638,13 +2649,15 @@ static void RunCompileJob(std::shared_ptr<WasmScriptRuntime::CompileJob> job, st
                 prev.reset();
         }
         bool ok = !job->cancelled.load(std::memory_order_relaxed) && compileResource(sourcePath, job->wasmFile, sdkPath, resourceName, root, rust);
+        if (ok && !job->cancelled.load(std::memory_order_relaxed))
+                job->module = CompileWasmFile(job->wasmFile, root);
         {
                 std::lock_guard<std::mutex> lk(g_compileJobsMutex);
                 auto it = g_compileJobs.find(job->wasmFile);
                 if (it != g_compileJobs.end() && it->second == job)
                         g_compileJobs.erase(it);
         }
-        job->ok = ok && !job->cancelled.load(std::memory_order_relaxed);
+        job->ok = ok && job->module && !job->cancelled.load(std::memory_order_relaxed);
         job->done.store(true, std::memory_order_release);
 }
 
@@ -2669,13 +2682,9 @@ void WasmScriptRuntime::drainPendingLoads()
         {
                 if (load.job && !load.job->ok)
                         continue;
-                std::vector<uint8_t> wasmBytes;
-                if (!ReadFileBytes(load.wasmFile, load.root, wasmBytes))
-                {
-                        LogError("Failed to read '%s'", load.wasmFile.c_str());
-                        continue;
-                }
-                loadWasm(wasmBytes, load.scriptFile, load.wasmFile);
+                wasmtime_module_t* module = load.job ? wasmtime_module_clone(load.job->module) : CompileWasmFile(load.wasmFile, load.root);
+                if (module)
+                        loadWasm(module, load.scriptFile, load.wasmFile);
         }
 }
 
@@ -2818,13 +2827,10 @@ result_t OM_DECL WasmScriptRuntime::LoadFile(char* scriptFile)
                 m_pendingLoads.push_back({ nullptr, scriptFile, wasmFile, resolvedRoot });
                 return FX_S_OK;
         }
-        std::vector<uint8_t> wasmBytes;
-        if (!ReadFileBytes(wasmFile, resolvedRoot, wasmBytes))
-        {
-                LogError("Failed to read '%s'", wasmFile.c_str());
+        wasmtime_module_t* module = CompileWasmFile(wasmFile, resolvedRoot);
+        if (!module)
                 return FX_E_INVALIDARG;
-        }
-        return loadWasm(wasmBytes, scriptFile, wasmFile);
+        return loadWasm(module, scriptFile, wasmFile);
 }
 
 result_t OM_DECL WasmScriptRuntime::WalkStack(char*, uint32_t, char*, uint32_t, IScriptStackWalkVisitor* visitor)
