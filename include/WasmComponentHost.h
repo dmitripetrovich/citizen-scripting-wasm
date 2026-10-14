@@ -53,16 +53,6 @@ inline bool operator==(const guid_t& a, const guid_t& b)
         return fx::GuidEquals(a, b);
 }
 
-inline bool operator!=(const guid_t& a, const guid_t& b)
-{
-        return !fx::GuidEquals(a, b);
-}
-
-inline bool operator<(const guid_t& a, const guid_t& b)
-{
-        return memcmp(&a, &b, sizeof(guid_t)) < 0;
-}
-
 #define OM_DECL
 
 #define NS_IMETHOD_(rv) virtual rv OM_DECL
@@ -200,15 +190,6 @@ class OMPtr
                         m_ref = nullptr;
                 }
                 return &m_ref;
-        }
-        result_t CopyTo(T** ptr) const
-        {
-                if (!ptr)
-                        return FX_E_INVALIDARG;
-                if (m_ref)
-                        m_ref->AddRef();
-                *ptr = m_ref;
-                return FX_S_OK;
         }
         template<class TOther>
         result_t As(OMPtr<TOther>* p)
@@ -634,7 +615,6 @@ class ScriptBuffer final : public fx::OMClass<ScriptBuffer, IScriptBuffer>
         std::vector<char> m_data;
 
     public:
-        ScriptBuffer() = default;
         explicit ScriptBuffer(std::vector<char> data) : m_data(std::move(data))
         {
         }
@@ -850,20 +830,11 @@ class PushEnvironment
         fx::OMPtr<IScriptRuntime> m_runtime;
 
     public:
-        PushEnvironment() = default;
         explicit PushEnvironment(IScriptRuntime* rt)
         {
                 m_handler = GetRuntimeHandler();
                 if (!m_handler.GetRef())
                         return;
-                m_runtime = fx::OMPtr<IScriptRuntime>(rt);
-                m_handler->PushRuntime(rt);
-        }
-        PushEnvironment(IScriptRuntimeHandler* handler, IScriptRuntime* rt)
-        {
-                if (!handler || !rt)
-                        return;
-                m_handler = fx::OMPtr<IScriptRuntimeHandler>(handler);
                 m_runtime = fx::OMPtr<IScriptRuntime>(rt);
                 m_handler->PushRuntime(rt);
         }
@@ -874,16 +845,7 @@ class PushEnvironment
         }
         PushEnvironment(const PushEnvironment&) = delete;
         PushEnvironment& operator=(const PushEnvironment&) = delete;
-        PushEnvironment(PushEnvironment&& o) noexcept : m_handler(std::move(o.m_handler)), m_runtime(std::move(o.m_runtime)) { }
 };
-
-inline result_t GetCurrentScriptRuntime(fx::OMPtr<IScriptRuntime>* out)
-{
-        const auto& h = GetRuntimeHandler();
-        if (!h.GetRef())
-                return FX_E_NOTIMPL;
-        return h->GetCurrentRuntime(out->ReleaseAndGetAddressOf());
-}
 
 }
 

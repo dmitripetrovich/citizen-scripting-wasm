@@ -32,7 +32,7 @@ namespace fx
 
 struct ProcessResult
 {
-        int32_t status = 0; // bytes written on success, -1 permission denied, -2 error, -3 timeout, -4 running
+        int32_t status = 0;
         int32_t exitCode = 0;
         std::string output;
         bool ok = false;
@@ -721,7 +721,6 @@ struct Reader
                                         v.children.push_back(read(d + 1));
                                 return v;
                         }
-                        // fixext
                         case 0xD4:
                                 return readExt(1);
                         case 0xD5:
@@ -732,14 +731,12 @@ struct Reader
                                 return readExt(8);
                         case 0xD8:
                                 return readExt(16);
-                        // ext8/ext16/ext32
                         case 0xC7:
                                 return readExt(u8());
                         case 0xC8:
                                 return readExt(u16());
                         case 0xC9:
                                 return readExt(u32());
-                        // map16/map32
                         case 0xDE:
                                 return readMap(u16(), d);
                         case 0xDF:
@@ -1861,11 +1858,11 @@ struct Context
         std::unordered_set<std::string> netSafeEvents;
         std::unordered_map<int32_t, TimerEntry> timers;
         int32_t nextTimerId = 1;
-        std::unordered_map<int32_t, int32_t> stateBagHandlerRefs; // cookie -> hostRef
+        std::unordered_map<int32_t, int32_t> stateBagHandlerRefs;
         std::unordered_map<int32_t, cfx::HttpCallback> httpCallbacks;
         bool httpResponseRegistered = false;
-        std::vector<int32_t> dispatchExpired; // scratch for dispatchTick
-        std::vector<std::shared_ptr<cfx::TickHandler>> tickSnapshot; // scratch for dispatchTick
+        std::vector<int32_t> dispatchExpired;
+        std::vector<std::shared_ptr<cfx::TickHandler>> tickSnapshot;
 
         int32_t addTimer(uint32_t ms, uint32_t intervalMs, std::function<void()> cb)
         {
@@ -2213,19 +2210,26 @@ namespace detail
                 }
                 pushArgs(ctx, idx + 1, std::forward<Rest>(rest)...);
         }
+
+        template<typename... TArgs>
+        inline NativeCtx invokeWithMask(uint64_t hash, uint32_t resultPtrMask, TArgs&&... args)
+        {
+                static_assert(sizeof...(TArgs) <= 32, "32 arguments max");
+                NativeCtx ctx{ };
+                ctx.hash = hash;
+                ctx.numArgs = static_cast<uint32_t>(sizeof...(args));
+                ctx.numResults = 3;
+                ctx.resultPtrMask = resultPtrMask;
+                pushArgs(ctx, 0, std::forward<TArgs>(args)...);
+                __cfxInvokeNative(reinterpret_cast<uint32_t>(&ctx));
+                return ctx;
+        }
 }
 
 template<typename... TArgs>
 inline NativeCtx invokeCtx(uint64_t hash, TArgs&&... args)
 {
-        static_assert(sizeof...(TArgs) <= 32, "32 arguments max");
-        NativeCtx ctx{ };
-        ctx.hash = hash;
-        ctx.numArgs = static_cast<uint32_t>(sizeof...(args));
-        ctx.numResults = 3;
-        detail::pushArgs(ctx, 0, std::forward<TArgs>(args)...);
-        __cfxInvokeNative(reinterpret_cast<uint32_t>(&ctx));
-        return ctx;
+        return detail::invokeWithMask(hash, 0, std::forward<TArgs>(args)...);
 }
 
 template<typename... TArgs>
@@ -2243,13 +2247,7 @@ inline TResult invoke(uint64_t hash, TArgs&&... args)
         }
         else if constexpr (std::is_same_v<TResult, std::string>)
         {
-                NativeCtx ctx{ };
-                ctx.hash = hash;
-                ctx.numArgs = static_cast<uint32_t>(sizeof...(args));
-                ctx.numResults = 3;
-                ctx.resultPtrMask = 0x1;
-                detail::pushArgs(ctx, 0, std::forward<TArgs>(args)...);
-                __cfxInvokeNative(reinterpret_cast<uint32_t>(&ctx));
+                auto ctx = detail::invokeWithMask(hash, 0x1, std::forward<TArgs>(args)...);
                 return getStringResult(ctx, 0);
         }
         else if constexpr (std::is_same_v<TResult, bool>)
@@ -2396,7 +2394,7 @@ inline bool wasEventCanceled()
 template<typename F>
 inline int32_t onResourceStart(F&& handler)
 {
-        return on("onResourceStart", [h = std::forward<F>(handler)](const std::string& /*source*/, const EventArgs& args)
+        return on("onResourceStart", [h = std::forward<F>(handler)](const std::string&, const EventArgs& args)
         {
                 if (args.size() > 0)
                         h(args.str(0));
@@ -2406,7 +2404,7 @@ inline int32_t onResourceStart(F&& handler)
 template<typename F>
 inline int32_t onResourceStop(F&& handler)
 {
-        return on("onResourceStop", [h = std::forward<F>(handler)](const std::string& /*source*/, const EventArgs& args)
+        return on("onResourceStop", [h = std::forward<F>(handler)](const std::string&, const EventArgs& args)
         {
                 if (args.size() > 0)
                         h(args.str(0));

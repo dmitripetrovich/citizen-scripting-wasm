@@ -685,7 +685,7 @@ static wasm_trap_t* CbCreateRef(void* env, wasmtime_caller_t*, const wasmtime_va
                 return result;
         });
         if (refIdx >= 0)
-                rt->wasmMapRef(refIdx, mod, callbackId);
+                rt->m_refToCallbackId[refIdx] = { mod, static_cast<int32_t>(callbackId) };
         results[0] = I32Val(refIdx);
         return nullptr;
 }
@@ -1637,11 +1637,6 @@ bool WasmScriptRuntime::callInvokeRef(WasmModule& mod, uint32_t callbackId, cons
         return true;
 }
 
-void WasmScriptRuntime::wasmMapRef(int32_t refIdx, WasmModule* mod, int32_t callbackId)
-{
-        m_refToCallbackId[refIdx] = { mod, callbackId };
-}
-
 void WasmScriptRuntime::defineImports(WasmModule& mod)
 {
         auto** types = CachedImportFuncTypes();
@@ -2080,29 +2075,10 @@ static bool extractSdk(const std::string& dir)
                 memcpy(&dataLen, p, 4);
                 p += 4;
                 if (static_cast<size_t>(end - p) < dataLen) return false;
-                std::string fullPath = dir + "/" + relPath;
-                auto slash = fullPath.rfind('/');
-                if (slash != std::string::npos)
-                {
-                        std::string parent = fullPath.substr(0, slash);
-                        mkdir(parent.c_str(), 0755);
-                        auto slash2 = parent.rfind('/');
-                        if (slash2 != std::string::npos)
-                                mkdir(parent.substr(0, slash2).c_str(), 0755);
-                }
-                FILE* f = fopen(fullPath.c_str(), "wb");
-                if (!f)
-                {
-                        std::string path;
-                        for (size_t j = 0; j < fullPath.size(); j++)
-                        {
-                                path += fullPath[j];
-                                if (fullPath[j] == '/' && j > 0)
-                                        mkdir(path.c_str(), 0755);
-                        }
-                        f = fopen(fullPath.c_str(), "wb");
-                        if (!f) return false;
-                }
+                for (size_t slash = relPath.find('/'); slash != std::string::npos; slash = relPath.find('/', slash + 1))
+                        mkdir((dir + "/" + relPath.substr(0, slash)).c_str(), 0755);
+                FILE* f = fopen((dir + "/" + relPath).c_str(), "wb");
+                if (!f) return false;
                 bool writeOk = fwrite(p, 1, dataLen, f) == dataLen;
                 fclose(f);
                 if (!writeOk) return false;

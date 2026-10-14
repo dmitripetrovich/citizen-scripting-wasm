@@ -296,7 +296,7 @@ impl MsgpackWriter {
                                 if n <= 255 { self.pu8(0xC7); self.pu8(n as u8); }
                                 else if n <= 65535 { self.pu8(0xC8); self.pu16(n as u16); }
                                 else { self.pu8(0xC9); self.pu32(n); }
-                                self.pu8(10); // ext type 10 = function reference
+                                self.pu8(10);
                                 self.buf.extend_from_slice(s.as_bytes());
                         }
                 }
@@ -509,7 +509,7 @@ struct EventHandlerEntry {
 
 struct TimerEntry {
         id: i32,
-        next_fire: u64, // ms since init
+        next_fire: u64,
         interval_ms: u32,
         callback: Rc<dyn Fn()>,
 }
@@ -1054,7 +1054,7 @@ fn resolve_export_ref(resource: &str, name: &str) -> String {
                         _ => String::new(),
                 };
                 *captured2.borrow_mut() = s;
-                vec![0x90] // empty array
+                vec![0x90]
         }));
         if setter_ref_str.is_empty() { return String::new(); }
         let setter_val = Value::FuncRef(setter_ref_str);

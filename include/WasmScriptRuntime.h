@@ -43,7 +43,6 @@ class BoundaryGuard
 
 using WasmNativeCtx = fx::NativeCtx;
 
-// {00F3A7B9-241D-5E4C-8A93-2FA1B2C3D4E5}
 FX_DEFINE_GUID(CLSID_WasmScriptRuntime, 0xF3A7B9, 0x241D, 0x5E4C, 0x8A, 0x93, 0x2F, 0xA1, 0xB2, 0xC3, 0xD4, 0xE5);
 
 struct WasmModule;
@@ -117,7 +116,6 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         }
 
         bool callInvokeRef(WasmModule& mod, uint32_t callbackId, const char* argsSerialized, uint32_t argsSize, std::vector<char>& result);
-        void wasmMapRef(int32_t refIdx, WasmModule* mod, int32_t callbackId);
 
         struct WorkerState
         {
