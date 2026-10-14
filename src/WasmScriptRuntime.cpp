@@ -2728,11 +2728,65 @@ static std::string escapeDep(const std::string& path)
         return out;
 }
 
-static bool scanCppDeps(const std::string& cppPath, const std::string& depFile, const std::string& sdkPath, const std::string& resourceName, std::vector<std::string>& deps)
+static std::string getZigLibDir()
+{
+        static std::mutex s_mutex;
+        static std::string s_dir;
+        static std::chrono::steady_clock::time_point s_nextAttempt{ };
+        std::lock_guard<std::mutex> lk(s_mutex);
+        auto now = std::chrono::steady_clock::now();
+        if (s_dir.empty() && now >= s_nextAttempt)
+        {
+                s_nextAttempt = now + std::chrono::seconds(30);
+                auto result = fx::spawnProgram({ "zig", "env" }, 65536, 10000);
+                const std::string& out = result.output;
+                size_t key = out.find("lib_dir");
+                size_t sep = key == std::string::npos ? std::string::npos : out.find_first_of(":=", key);
+                size_t open = sep == std::string::npos ? std::string::npos : out.find('"', sep);
+                size_t close = open == std::string::npos ? std::string::npos : out.find('"', open + 1);
+                std::string reason;
+                if (!processFailed(result, reason) && close != std::string::npos)
+                        s_dir = out.substr(open + 1, close - open - 1);
+        }
+        return s_dir;
+}
+
+static std::string YamlQuote(const std::string& text)
+{
+        std::string out = "'";
+        for (char c : text)
+        {
+                if (c == '\'')
+                        out += '\'';
+                out += c;
+        }
+        return out + "'";
+}
+
+static bool writeCompileOverlay(const std::string& path, std::initializer_list<std::string> dirs)
+{
+        std::string yaml = "{ 'version': 0, 'fallthrough': false, 'roots': [";
+        std::unordered_set<std::string> seen;
+        for (const auto& dir : dirs)
+        {
+                if (dir.empty() || !seen.insert(dir).second)
+                        continue;
+                yaml += seen.size() > 1 ? ",\n" : "\n";
+                yaml += "  { 'type': 'directory-remap', 'name': " + YamlQuote(dir) + ", 'external-contents': " + YamlQuote(dir) + " }";
+        }
+        yaml += "\n] }\n";
+        FILE* f = fopen(path.c_str(), "wb");
+        if (!f)
+                return false;
+        bool ok = fwrite(yaml.data(), 1, yaml.size(), f) == yaml.size();
+        return fclose(f) == 0 && ok;
+}
+
+static bool scanCppDeps(const std::string& cppPath, const std::string& depFile, const std::string& sdkPath, const std::string& overlay, const std::string& resourceName, std::vector<std::string>& deps)
 {
         std::vector<std::string> args{ "zig", "c++" };
         args.insert(args.end(), g_cppFlags.begin(), g_cppFlags.end());
-        args.insert(args.end(), { "-I" + sdkPath, "-MM", "-MF", depFile, cppPath });
+        args.insert(args.end(), { "-ivfsoverlay", overlay, "-I" + sdkPath, "-MM", "-MF", depFile, cppPath });
         auto result = fx::spawnProgram(args, 1048576, 60000);
         std::string reason;
         if (processFailed(result, reason))
@@ -2805,7 +2859,7 @@ static bool StripDebugSections(const std::string& wasmPath)
         return true;
 }
 
-static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& resourceName, const std::string& root)
+static bool compileCppSources(const std::string& cppPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& overlay, const std::string& resourceName, const std::string& root)
 {
         std::vector<std::string> sources{ cppPath };
         std::unordered_set<std::string> seenSources{ cppPath };
@@ -2814,7 +2868,7 @@ static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, 
         for (size_t i = 0; i < sources.size(); ++i)
         {
                 std::vector<std::string> deps;
-                if (!scanCppDeps(sources[i], wasmPath + ".d.tmp", sdkPath, resourceName, deps) || !DepsInside(deps, root, sdkPath, sources[i], resourceName))
+                if (!scanCppDeps(sources[i], wasmPath + ".d.tmp", sdkPath, overlay, resourceName, deps) || !DepsInside(deps, root, sdkPath, sources[i], resourceName))
                         return false;
                 for (const auto& dep : deps)
                 {
@@ -2834,7 +2888,7 @@ static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, 
         }
         std::vector<std::string> args{ "zig", "c++" };
         args.insert(args.end(), g_cppFlags.begin(), g_cppFlags.end());
-        args.push_back("-I" + sdkPath);
+        args.insert(args.end(), { "-ivfsoverlay", overlay, "-I" + sdkPath });
         args.insert(args.end(), sources.begin(), sources.end());
         args.push_back("-o");
         args.push_back(wasmPath);
@@ -2864,6 +2918,26 @@ static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, 
         }
         fclose(f);
         return true;
+}
+
+static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& resourceName, const std::string& root)
+{
+        std::string zigLib = getZigLibDir();
+        if (zigLib.empty())
+        {
+                LogError("Failed to run 'zig env', is Zig installed and on PATH?");
+                return false;
+        }
+        std::string overlay = wasmPath + ".vfs.yaml";
+        if (!writeCompileOverlay(overlay, { root, sdkPath, RealPath(sdkPath), zigLib, RealPath(zigLib) }))
+        {
+                unlink(overlay.c_str());
+                LogError("Failed to write the compiler file overlay for '%s' in resource '%s'", cppPath.c_str(), resourceName.c_str());
+                return false;
+        }
+        bool ok = compileCppSources(cppPath, wasmPath, sdkPath, overlay, resourceName, root);
+        unlink(overlay.c_str());
+        return ok;
 }
 
 static bool compileResource(const std::string& sourcePath, const std::string& wasmFile, const std::string& sdkPath, const std::string& resourceName, const std::string& root, bool rust)
