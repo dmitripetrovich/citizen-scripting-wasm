@@ -1970,7 +1970,6 @@ result_t OM_DECL WasmScriptRuntime::TriggerEvent(char* eventName, char* argsSeri
                 return FX_S_OK;
         fx::PushEnvironment env(static_cast<IScriptRuntime*>(this));
         BoundaryGuard boundary(m_host.GetRef(), static_cast<int64_t>(nextBoundaryId()));
-        m_eventCanceled = false;
         std::string_view name(eventName);
         std::string_view src(sourceId ? sourceId : "-1");
         uint64_t nameAllocSz64 = static_cast<uint64_t>(name.size()) + 1;
@@ -1982,6 +1981,8 @@ result_t OM_DECL WasmScriptRuntime::TriggerEvent(char* eventName, char* argsSeri
         uint32_t nameAllocSz = static_cast<uint32_t>(nameAllocSz64);
         uint32_t argsAllocSz = static_cast<uint32_t>(argsAllocSz64);
         uint32_t totalSz = static_cast<uint32_t>(totalSz64);
+        bool outerCanceled = m_eventCanceled;
+        m_eventCanceled = false;
         auto modules = m_modules;
         for (auto& mod : modules)
         {
@@ -2011,6 +2012,7 @@ result_t OM_DECL WasmScriptRuntime::TriggerEvent(char* eventName, char* argsSeri
                         ScriptPrint(m_host.GetRef(), m_resourceName, "^1SCRIPT ERROR: @" + m_resourceName + "/" + mod->scriptFile + ": WASM trap in event '" + eventName + "'^7");
                 mod->wasmFree(block, totalSz);
         }
+        m_eventCanceled = outerCanceled;
         return FX_S_OK;
 }
 
