@@ -380,6 +380,7 @@ struct OMImplementsDef
 #include <thread>
 #include <vector>
 
+#include <dirent.h>
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
@@ -424,6 +425,24 @@ inline const std::vector<std::string>& cachedFilteredEnv()
         return s_env;
 }
 
+inline void closeInheritedFds(posix_spawn_file_actions_t* actions)
+{
+        DIR* dir = opendir("/proc/self/fd");
+        if (!dir)
+                return;
+        while (dirent* entry = readdir(dir))
+        {
+                char* end = nullptr;
+                long fd = strtol(entry->d_name, &end, 10);
+                if (end == entry->d_name || *end != '\0' || fd <= STDERR_FILENO)
+                        continue;
+                int flags = fcntl(static_cast<int>(fd), F_GETFD);
+                if (flags >= 0 && !(flags & FD_CLOEXEC))
+                        posix_spawn_file_actions_addclose(actions, static_cast<int>(fd));
+        }
+        closedir(dir);
+}
+
 inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv, bool searchPath, size_t maxOutputBytes, int timeoutMs, bool killOnOutputCap, const std::atomic<bool>* cancel)
 {
         ProcessResult result{ };
@@ -445,6 +464,7 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
         posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
         posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDERR_FILENO);
         posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+        closeInheritedFds(&actions);
         posix_spawnattr_t attr;
         posix_spawnattr_init(&attr);
         posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
@@ -548,6 +568,7 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
                 }
                 waitpid(pid, &wstatus, 0);
         }
+        kill(-pid, SIGKILL);
         while (!result.output.empty() && result.output.back() == '\n')
                 result.output.pop_back();
         if (timedOut)
