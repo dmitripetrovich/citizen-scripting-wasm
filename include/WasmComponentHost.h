@@ -1,5 +1,7 @@
 #pragma once
 
+#include "CppSdk.h"
+
 #include <atomic>
 #include <cassert>
 #include <cstdlib>

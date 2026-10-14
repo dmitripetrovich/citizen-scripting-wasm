@@ -8,7 +8,7 @@
  * Original source: https://github.com/citizenfx/fivem/blob/master/code/components/citizen-scripting-{core,lua,mono-v2,mono,node,v8}/src/Component.cpp
  */
 
-#include "CppSdk.h"
+#include "WasmComponentHost.h"
 
 class EXPORTED_TYPE ComponentInstance : public OMComponentBase<Component>
 {
