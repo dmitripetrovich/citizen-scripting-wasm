@@ -31,8 +31,9 @@ static std::unordered_set<int32_t> s_activeInstanceIds;
 static constexpr int64_t WASM_MEMORY_LIMIT = 256 * 1024 * 1024;
 static constexpr uint64_t WASM_FUEL_AMOUNT = 1000000000ULL;
 static constexpr uint32_t RESULT_BUF_SIZE = 65536;
-static constexpr int WORKER_SHUTDOWN_ATTEMPTS = 50;
-static constexpr int WORKER_SHUTDOWN_INTERVAL_MS = 100;
+static constexpr int EPOCH_TICK_MS = 10;
+static constexpr uint64_t WASM_CALL_TIMEOUT_TICKS = 5000 / EPOCH_TICK_MS;
+static constexpr int WORKER_STOP_TIMEOUT_MS = 1000;
 static constexpr size_t MAX_BOOKMARKS_PER_RESOURCE = 1024;
 static constexpr size_t MIN_NATIVE_PTR_BOUNDS = 4096;
 
@@ -1030,12 +1031,23 @@ static wasm_trap_t* CbWorkerStub(void*, wasmtime_caller_t*, const wasmtime_val_t
         return nullptr;
 }
 
+static wasmtime_error_t* WorkerEpochCallback(wasmtime_context_t*, void* env, uint64_t* delta, wasmtime_update_deadline_kind_t* kind)
+{
+        if (static_cast<WasmScriptRuntime::WorkerState*>(env)->cancelled.load(std::memory_order_relaxed))
+                return wasmtime_error_new("worker cancelled");
+        *delta = 1;
+        *kind = WASMTIME_UPDATE_DEADLINE_CONTINUE;
+        return nullptr;
+}
+
 static void RunWorker(std::shared_ptr<WasmScriptRuntime::WorkerState> state, wasmtime_module_t* mod, std::string fnName, std::vector<char> inputData)
 {
         auto* eng = WasmScriptRuntime::engine();
         auto* store = wasmtime_store_new(eng, nullptr, nullptr);
         wasmtime_store_limiter(store, WASM_MEMORY_LIMIT, -1, -1, -1, -1);
         wasmtime_context_set_fuel(wasmtime_store_context(store), WASM_FUEL_AMOUNT);
+        wasmtime_context_set_epoch_deadline(wasmtime_store_context(store), 1);
+        wasmtime_store_epoch_deadline_callback(store, WorkerEpochCallback, state.get(), nullptr);
         auto* linker = wasmtime_linker_new(eng);
         wasmtime_linker_allow_shadowing(linker, true);
         if (auto* wasi_err = wasmtime_linker_define_wasi(linker))
@@ -1403,16 +1415,28 @@ wasm_engine_t* WasmScriptRuntime::engine()
         {
                 wasm_config_t* config = wasm_config_new();
                 wasmtime_config_consume_fuel_set(config, true);
-                return wasm_engine_new_with_config(config);
+                wasmtime_config_epoch_interruption_set(config, true);
+                wasm_engine_t* eng = wasm_engine_new_with_config(config);
+                std::thread([eng]
+                {
+                        while (true)
+                        {
+                                std::this_thread::sleep_for(std::chrono::milliseconds(EPOCH_TICK_MS));
+                                wasmtime_engine_increment_epoch(eng);
+                        }
+                }).detach();
+                return eng;
         }();
         return g_engine;
 }
 
-void WasmModule::refuelWasm()
+void WasmModule::resetLimits()
 {
         if (!store)
                 return;
-        wasmtime_context_set_fuel(wasmtime_store_context(store), WASM_FUEL_AMOUNT);
+        auto* ctx = wasmtime_store_context(store);
+        wasmtime_context_set_fuel(ctx, WASM_FUEL_AMOUNT);
+        wasmtime_context_set_epoch_deadline(ctx, WASM_CALL_TIMEOUT_TICKS);
 }
 
 uint8_t* WasmModule::wasmBase()
@@ -1434,7 +1458,7 @@ bool WasmModule::call(const wasmtime_func_t& fn, const wasmtime_val_t* args, siz
         if (!store)
                 return false;
         if (callDepth == 0)
-                refuelWasm();
+                resetLimits();
         ++callDepth;
         WasmModule* prev = rt->m_activeModule;
         rt->m_activeModule = this;
@@ -1669,123 +1693,31 @@ bool WasmScriptRuntime::resolveExports(WasmModule& mod)
         return mod.call(initFn, nullptr, 0, nullptr, 0, "__cfx_init trap");
 }
 
-static struct OrphanedWorkerList
-{
-        struct Entry
-        {
-                std::thread thread;
-                std::shared_ptr<WasmScriptRuntime::WorkerState> state;
-        };
-
-        std::mutex mutex;
-        std::vector<Entry> entries;
-        std::atomic<bool> hasEntries{ false };
-        std::atomic<int64_t> lastReapMs{ 0 };
-        static constexpr int64_t REAP_INTERVAL_MS = 1000;
-
-        ~OrphanedWorkerList()
-        {
-                auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-                std::lock_guard<std::mutex> lk(mutex);
-                for (auto& e : entries)
-                {
-                        if (!e.thread.joinable())
-                                continue;
-                        bool done = false;
-                        while (!done && std::chrono::steady_clock::now() < deadline)
-                        {
-                                {
-                                        std::lock_guard<std::mutex> slk(e.state->mutex);
-                                        done = e.state->status != WasmScriptRuntime::WorkerState::Running;
-                                }
-                                if (!done)
-                                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                        }
-                        if (done)
-                                e.thread.join();
-                        else
-                                e.thread.detach();
-                }
-        }
-
-        void reap()
-        {
-                if (!hasEntries.load(std::memory_order_relaxed))
-                        return;
-                auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-                int64_t last = lastReapMs.load(std::memory_order_relaxed);
-                if (nowMs - last < REAP_INTERVAL_MS)
-                        return;
-                if (!lastReapMs.compare_exchange_strong(last, nowMs, std::memory_order_relaxed))
-                        return;
-                std::lock_guard<std::mutex> lk(mutex);
-                auto it = entries.begin();
-                while (it != entries.end())
-                {
-                        bool done;
-                        {
-                                std::lock_guard<std::mutex> slk(it->state->mutex);
-                                done = it->state->status != WasmScriptRuntime::WorkerState::Running;
-                        }
-                        if (done)
-                        {
-                                it->thread.join();
-                                it = entries.erase(it);
-                        }
-                        else
-                                ++it;
-                }
-                hasEntries.store(!entries.empty(), std::memory_order_relaxed);
-        }
-
-        void add(std::thread&& t, std::shared_ptr<WasmScriptRuntime::WorkerState> s)
-        {
-                std::lock_guard<std::mutex> lk(mutex);
-                entries.push_back({std::move(t), std::move(s)});
-                hasEntries.store(true, std::memory_order_relaxed);
-        }
-} g_orphanedWorkers;
-
 static std::atomic<bool> g_serverTicking{ false };
 
 void WasmScriptRuntime::destroyWorkers()
 {
-        g_orphanedWorkers.reap();
-        if (!m_workers.empty())
+        for (auto& [id, w] : m_workers)
+                w->cancelled.store(true, std::memory_order_relaxed);
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(WORKER_STOP_TIMEOUT_MS);
+        for (auto& [id, w] : m_workers)
         {
-                auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(WORKER_SHUTDOWN_ATTEMPTS * WORKER_SHUTDOWN_INTERVAL_MS);
-                bool allDone = false;
-                while (!allDone && std::chrono::steady_clock::now() < deadline)
+                if (!w->thread.joinable())
+                        continue;
+                auto running = [&]
                 {
-                        allDone = true;
-                        for (auto& [id, w] : m_workers)
-                        {
-                                if (!w->thread.joinable())
-                                        continue;
-                                std::lock_guard<std::mutex> lk(w->mutex);
-                                if (w->status == WorkerState::Running)
-                                        allDone = false;
-                        }
-                        if (!allDone)
-                                std::this_thread::sleep_for(std::chrono::milliseconds(WORKER_SHUTDOWN_INTERVAL_MS));
-                }
-                for (auto& [id, w] : m_workers)
+                        std::lock_guard<std::mutex> lk(w->mutex);
+                        return w->status == WorkerState::Running;
+                };
+                while (running() && std::chrono::steady_clock::now() < deadline)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                if (running())
                 {
-                        if (!w->thread.joinable())
-                                continue;
-                        bool done;
-                        {
-                                std::lock_guard<std::mutex> lk(w->mutex);
-                                done = w->status != WorkerState::Running;
-                        }
-                        if (done)
-                                w->thread.join();
-                        else
-                        {
-                                LogWarning("Worker %d in '%s' did not finish within %ds, orphaning", id, m_resourceName.c_str(), (WORKER_SHUTDOWN_ATTEMPTS * WORKER_SHUTDOWN_INTERVAL_MS) / 1000);
-                                g_orphanedWorkers.add(std::move(w->thread), w);
-                        }
+                        LogWarning("Worker %d in '%s' is blocked outside wasm and can't be cancelled yet, detaching it", id, m_resourceName.c_str());
+                        w->thread.detach();
                 }
+                else
+                        w->thread.join();
         }
         m_workers.clear();
 }
@@ -1863,7 +1795,7 @@ result_t WasmScriptRuntime::loadWasm(const std::vector<uint8_t>& wasmBytes, cons
                         LogWarning("WASI context error in '%s': %s", m_resourceName.c_str(), ExtractWasmError(werr, nullptr).c_str());
         }
         defineImports(*mod);
-        mod->refuelWasm();
+        mod->resetLimits();
         {
                 wasmtime_error_t* err = wasmtime_module_new(engine(), wasmBytes.data(), wasmBytes.size(), &mod->module);
                 if (err)
@@ -1902,7 +1834,6 @@ result_t WasmScriptRuntime::loadWasm(const std::vector<uint8_t>& wasmBytes, cons
 
 result_t OM_DECL WasmScriptRuntime::Tick()
 {
-        g_orphanedWorkers.reap();
         g_serverTicking.store(true, std::memory_order_relaxed);
         drainPendingLoads();
         if (m_modules.empty())

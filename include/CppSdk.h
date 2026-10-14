@@ -3619,6 +3619,7 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
                 std::vector<char> result;
                 std::string resourceName;
                 const WasmModule* owner = nullptr;
+                std::atomic<bool> cancelled{ false };
         };
 
         static constexpr int32_t MAX_WORKERS_PER_RESOURCE = 8;
@@ -3746,7 +3747,7 @@ struct WasmModule : std::enable_shared_from_this<WasmModule>
         size_t wasmMemSize();
         uint32_t wasmAlloc(uint32_t size);
         void wasmFree(uint32_t ptr, uint32_t size);
-        void refuelWasm();
+        void resetLimits();
         bool call(const wasmtime_func_t& fn, const wasmtime_val_t* args, size_t nargs, wasmtime_val_t* results, size_t nresults, const char* label);
         bool callVoid(const wasmtime_func_t& fn);
         bool callEvent(uint32_t namePtr, uint32_t nameLen, uint32_t argsPtr, uint32_t argsLen, uint32_t srcPtr, uint32_t srcLen);
