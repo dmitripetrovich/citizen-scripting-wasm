@@ -34,7 +34,6 @@ static constexpr uint32_t RESULT_BUF_SIZE = 65536;
 static constexpr int EPOCH_TICK_MS = 10;
 static constexpr uint64_t WASM_CALL_TIMEOUT_TICKS = 5000 / EPOCH_TICK_MS;
 static constexpr int WORKER_STOP_TIMEOUT_MS = 1000;
-static constexpr size_t MAX_BOOKMARKS_PER_RESOURCE = 1024;
 
 static std::string GetResourcePath(IScriptHost* host, const std::string& name)
 {
@@ -1711,20 +1710,7 @@ void WasmScriptRuntime::scheduleWasmBookmark(WasmModule& mod, int32_t wasmId, in
 {
         if (!m_bookmarkHost.GetRef())
                 return;
-        auto it = mod.wasmToHostBookmark.find(wasmId);
-        uint64_t hostId;
-        if (it != mod.wasmToHostBookmark.end())
-        {
-                hostId = it->second;
-        }
-        else
-        {
-                if (m_hostToWasmBookmark.size() >= MAX_BOOKMARKS_PER_RESOURCE)
-                        return;
-                hostId = m_nextWasmHostBookmarkId++;
-                mod.wasmToHostBookmark[wasmId] = hostId;
-                m_hostToWasmBookmark[hostId] = { &mod, wasmId };
-        }
+        uint64_t hostId = (static_cast<uint64_t>(mod.bookmarkSlot) << 32) | static_cast<uint32_t>(wasmId);
         if (deadlineMs < 0)
                 deadlineMs = 0;
         int64_t deadline = (deadlineMs == 0) ? 0 : -static_cast<int64_t>(deadlineMs);
@@ -1904,13 +1890,6 @@ void WasmScriptRuntime::destroyWorkers()
 void WasmScriptRuntime::destroyModule(WasmModule& mod)
 {
         FlushModuleStdio(mod, true);
-        for (auto it = m_hostToWasmBookmark.begin(); it != m_hostToWasmBookmark.end(); )
-        {
-                if (it->second.mod == &mod)
-                        it = m_hostToWasmBookmark.erase(it);
-                else
-                        ++it;
-        }
         for (auto it = m_refToCallbackId.begin(); it != m_refToCallbackId.end(); )
         {
                 if (it->second.mod == &mod)
@@ -1933,7 +1912,6 @@ void WasmScriptRuntime::destroyModule(WasmModule& mod)
                 p.second->cancelled.store(true, std::memory_order_relaxed);
                 return true;
         });
-        mod.wasmToHostBookmark.clear();
         if (mod.linker)
         {
                 wasmtime_linker_delete(mod.linker);
@@ -1968,6 +1946,7 @@ result_t WasmScriptRuntime::loadWasm(wasmtime_module_t* module, const std::strin
         mod->rt = this;
         mod->module = module;
         mod->scriptFile = scriptFile;
+        mod->bookmarkSlot = m_nextBookmarkSlot++;
         mod->store = wasmtime_store_new(engine(), mod.get(), nullptr);
         wasmtime_store_limiter(mod->store, WASM_MEMORY_LIMIT, -1, -1, -1, -1);
         mod->linker = wasmtime_linker_new(engine());
@@ -2049,13 +2028,12 @@ result_t OM_DECL WasmScriptRuntime::TickBookmarks(uint64_t* bookmarks, int32_t n
         {
                 if (!runMod || wasmIds.empty())
                         return;
-                auto it = std::find_if(modules.begin(), modules.end(), [&](const std::shared_ptr<WasmModule>& m) { return m.get() == runMod; });
-                if (it == modules.end() || !(*it)->hasTickBookmarksFn || !(*it)->store)
+                auto& mod = *runMod;
+                if (!mod.hasTickBookmarksFn || !mod.store)
                 {
                         wasmIds.clear();
                         return;
                 }
-                auto& mod = **it;
                 uint32_t arrSize = static_cast<uint32_t>(wasmIds.size() * sizeof(int32_t));
                 uint32_t arrPtr = mod.wasmAlloc(arrSize);
                 if (arrPtr)
@@ -2075,15 +2053,15 @@ result_t OM_DECL WasmScriptRuntime::TickBookmarks(uint64_t* bookmarks, int32_t n
         };
         for (int32_t i = 0; i < numBookmarks; ++i)
         {
-                auto it = m_hostToWasmBookmark.find(bookmarks[i]);
-                if (it == m_hostToWasmBookmark.end())
-                        continue;
-                if (it->second.mod != runMod)
+                uint32_t slot = static_cast<uint32_t>(bookmarks[i] >> 32);
+                if (!runMod || runMod->bookmarkSlot != slot)
                 {
                         flush();
-                        runMod = it->second.mod;
+                        auto it = std::find_if(modules.begin(), modules.end(), [&](const std::shared_ptr<WasmModule>& m) { return m->bookmarkSlot == slot; });
+                        runMod = it != modules.end() ? it->get() : nullptr;
                 }
-                wasmIds.push_back(it->second.wasmId);
+                if (runMod)
+                        wasmIds.push_back(static_cast<int32_t>(static_cast<uint32_t>(bookmarks[i])));
         }
         flush();
         return FX_S_OK;

@@ -165,13 +165,7 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         uint64_t m_nextBoundaryId = 1;
         uint64_t nextBoundaryId();
         std::vector<std::shared_ptr<WasmModule>> m_modules;
-        struct WasmBookmark
-        {
-                WasmModule* mod = nullptr;
-                int32_t wasmId = 0;
-        };
-        std::unordered_map<uint64_t, WasmBookmark> m_hostToWasmBookmark;
-        uint64_t m_nextWasmHostBookmarkId = 1;
+        uint32_t m_nextBookmarkSlot = 1;
 
     public:
         struct CompileJob
@@ -245,7 +239,7 @@ struct WasmModule : std::enable_shared_from_this<WasmModule>
         bool limitExceeded = false;
         std::string lastNativeError;
         std::string stdioBuffer;
-        std::unordered_map<int32_t, uint64_t> wasmToHostBookmark;
+        uint32_t bookmarkSlot = 0;
 
         uint8_t* wasmBase();
         size_t wasmMemSize();
