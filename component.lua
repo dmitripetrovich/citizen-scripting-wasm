@@ -14,7 +14,7 @@ return function()
         includedirs { ("%s/include"):format(wasmtime_dir) }
         linkoptions { ("%s/lib/libwasmtime.a"):format(wasmtime_dir), "-lpthread", "-ldl", "-lm" }
         makesettings [[
-CC = zig cc -target x86_64-linux-musl
-CXX = zig c++ -target x86_64-linux-musl
-]]
+                CC = zig cc -target x86_64-linux-musl
+                CXX = zig c++ -target x86_64-linux-musl
+        ]]
 end
