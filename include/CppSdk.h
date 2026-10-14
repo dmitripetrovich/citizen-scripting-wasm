@@ -3090,6 +3090,12 @@ inline int32_t& nextCoroutineId()
         return s_id;
 }
 
+inline std::chrono::steady_clock::time_point& earliestResume()
+{
+        static std::chrono::steady_clock::time_point s_at = std::chrono::steady_clock::time_point::max();
+        return s_at;
+}
+
 inline void resumeCoroutineById(int32_t id)
 {
         auto& coros = coroutines();
@@ -3102,6 +3108,9 @@ inline void resumeCoroutineById(int32_t id)
         handle.promise().exception = nullptr;
 #endif
         handle.resume();
+        it = coros.find(id);
+        if (it == coros.end())
+                return;
         if (handle.done())
         {
 #if __cpp_exceptions
@@ -3119,21 +3128,40 @@ inline void resumeCoroutineById(int32_t id)
                 int64_t waitMs = handle.promise().waitMs;
                 auto now = std::chrono::steady_clock::now();
                 it->second.resumeAt = (waitMs > 0) ? now + std::chrono::milliseconds(waitMs) : now;
+                earliestResume() = std::min(earliestResume(), it->second.resumeAt);
                 int32_t deadline = waitMs <= 0 ? 0 : (waitMs > static_cast<int64_t>(INT32_MAX) ? INT32_MAX : static_cast<int32_t>(waitMs));
                 __cfxScheduleBookmark(id, deadline);
         }
 }
 
-inline void resumeCoroutines()
+inline void resumeCoroutineIfDue(int32_t id)
 {
         auto& coros = coroutines();
-        if (coros.empty())
+        auto it = coros.find(id);
+        if (it != coros.end() && std::chrono::steady_clock::now() >= it->second.resumeAt)
+                resumeCoroutineById(id);
+}
+
+inline bool hasDueCoroutines()
+{
+        return !coroutines().empty() && std::chrono::steady_clock::now() >= earliestResume();
+}
+
+inline void resumeCoroutines()
+{
+        if (!hasDueCoroutines())
                 return;
         auto now = std::chrono::steady_clock::now();
+        auto next = std::chrono::steady_clock::time_point::max();
         std::vector<int32_t> ready;
-        for (auto& [id, entry] : coros)
+        for (auto& [id, entry] : coroutines())
+        {
                 if (now >= entry.resumeAt)
                         ready.push_back(id);
+                else
+                        next = std::min(next, entry.resumeAt);
+        }
+        earliestResume() = next;
         for (auto id : ready)
                 resumeCoroutineById(id);
 }
@@ -3198,6 +3226,7 @@ namespace detail
                         return;
                 }
                 coros[id] = { task.handle, std::move(stored), std::chrono::steady_clock::now() };
+                fxw_internal::earliestResume() = std::min(fxw_internal::earliestResume(), coros[id].resumeAt);
                 if (resumeNow)
                         fxw_internal::resumeCoroutineById(id);
                 else
@@ -3336,7 +3365,7 @@ void __cfxFree(void* ptr, uint32_t)
 CFX_WASM_EXPORT(__cfx_has_pending_work)
 int32_t __cfxHasPendingWork()
 {
-        if (!fxw_internal::coroutines().empty())
+        if (fxw_internal::hasDueCoroutines())
                 return 1;
         auto* c = fxw_internal::currentContext();
         if (!c)
@@ -3356,7 +3385,7 @@ CFX_WASM_EXPORT(__cfx_tick_bookmarks)
 void __cfxTickBookmarks(int32_t* bookmarks, int32_t count)
 {
         for (int32_t i = 0; i < count; ++i)
-                fxw_internal::resumeCoroutineById(bookmarks[i]);
+                fxw_internal::resumeCoroutineIfDue(bookmarks[i]);
 }
 
 CFX_WASM_EXPORT(__cfx_on_event)

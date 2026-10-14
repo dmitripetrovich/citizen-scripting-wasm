@@ -535,6 +535,7 @@ struct Context {
         next_timer_id: i32,
         coroutines: HashMap<i32, CoroutineEntry>,
         next_coroutine_id: i32,
+        earliest_resume: u64,
         commands: HashMap<String, Vec<Rc<dyn Fn(&str, &[String])>>>,
         ref_callbacks: HashMap<i32, RefCallbackFn>,
         ref_counts: HashMap<i32, i32>,
@@ -562,6 +563,7 @@ impl Context {
                         next_timer_id: 1,
                         coroutines: HashMap::new(),
                         next_coroutine_id: 1,
+                        earliest_resume: u64::MAX,
                         commands: HashMap::new(),
                         ref_callbacks: HashMap::new(),
                         ref_counts: HashMap::new(),
@@ -616,6 +618,7 @@ fn resume_coroutine_by_id(id: i32) {
                         let wait_ms = unsafe { *CORO_WAIT_MS.get() };
                         let now = unsafe { (*c).now_ms() };
                         entry.resume_at = if wait_ms > 0 { now + wait_ms as u64 } else { now };
+                        unsafe { (*c).earliest_resume = (*c).earliest_resume.min(entry.resume_at) };
                         let deadline = if wait_ms <= 0 { 0 } else if wait_ms > i32::MAX as i64 { i32::MAX } else { wait_ms as i32 };
                         unsafe { __cfx_schedule_bookmark(id, deadline); }
                         unsafe { (*c).coroutines.insert(id, entry) };
@@ -1358,6 +1361,22 @@ pub fn create_thread(f: impl Future<Output = ()> + 'static) {
         create_coroutine(f);
 }
 
+fn resume_coroutine_if_due(id: i32) {
+        let c = ctx();
+        let due = match unsafe { (*c).coroutines.get(&id) } {
+                Some(e) => (unsafe { (*c).now_ms() }) >= e.resume_at,
+                None => false,
+        };
+        if due {
+                resume_coroutine_by_id(id);
+        }
+}
+
+fn has_due_coroutines() -> bool {
+        let c = ctx();
+        unsafe { !(*c).coroutines.is_empty() && (*c).now_ms() >= (*c).earliest_resume }
+}
+
 fn create_coroutine_impl(f: impl Future<Output = ()> + 'static, resume_now: bool) {
         let c = ctx();
         if unsafe { (*c).coroutines.len() } >= 4096 {
@@ -1371,6 +1390,7 @@ fn create_coroutine_impl(f: impl Future<Output = ()> + 'static, resume_now: bool
         }
         let now = unsafe { (*c).now_ms() };
         unsafe { (*c).coroutines.insert(id, CoroutineEntry { future: Box::pin(f), resume_at: now }) };
+        unsafe { (*c).earliest_resume = (*c).earliest_resume.min(now) };
         if resume_now {
                 resume_coroutine_by_id(id);
         } else {
@@ -1851,17 +1871,21 @@ pub mod runtime {
         }
 
         pub fn on_tick() {
-                {
+                if has_due_coroutines() {
                         let c = ctx();
-                        if unsafe { !(*c).coroutines.is_empty() } {
-                                let now = unsafe { (*c).now_ms() };
-                                let ready: Vec<i32> = unsafe { (*c).coroutines.iter() }
-                                        .filter(|(_, e)| now >= e.resume_at)
-                                        .map(|(id, _)| *id)
-                                        .collect();
-                                for id in ready {
-                                        resume_coroutine_by_id(id);
+                        let now = unsafe { (*c).now_ms() };
+                        let mut next = u64::MAX;
+                        let mut ready = Vec::new();
+                        for (id, e) in unsafe { (*c).coroutines.iter() } {
+                                if now >= e.resume_at {
+                                        ready.push(*id);
+                                } else {
+                                        next = next.min(e.resume_at);
                                 }
+                        }
+                        unsafe { (*c).earliest_resume = next };
+                        for id in ready {
+                                resume_coroutine_by_id(id);
                         }
                 }
                 let c = ctx();
@@ -1948,7 +1972,7 @@ pub mod runtime {
 
         pub fn has_pending_work() -> i32 {
                 let c = ctx();
-                if unsafe { !(*c).ticks.is_empty() || !(*c).timers.is_empty() || !(*c).coroutines.is_empty() } { 1 } else { 0 }
+                if unsafe { !(*c).ticks.is_empty() || !(*c).timers.is_empty() } || has_due_coroutines() { 1 } else { 0 }
         }
 
         pub fn invoke_ref(callback_id: i32, args_ptr: *const u8, args_len: u32, result_ptr: *mut u8, result_max: u32) -> i32 {
@@ -1996,7 +2020,7 @@ pub mod runtime {
                 if count <= 0 { return; }
                 let ids = unsafe { std::slice::from_raw_parts(bookmarks, count as usize) };
                 for &id in ids {
-                        resume_coroutine_by_id(id);
+                        resume_coroutine_if_due(id);
                 }
         }
 }
