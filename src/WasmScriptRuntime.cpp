@@ -2297,7 +2297,27 @@ static std::string getSdkPath()
         return s_sdkPath;
 }
 
-static bool isBuiltWithCurrentSdk(const std::string& wasmPath)
+static const std::vector<std::string> g_cppFlags = { "-target", "wasm32-wasi", "-std=c++23", "-O2", "-fno-exceptions", "-mexec-model=reactor", "-g0", "-Wl,--export-memory" };
+static const std::vector<std::string> g_rustFlags = { "--crate-type", "cdylib", "--edition", "2021", "-O", "--target", "wasm32-wasip1", "-C", "link-args=--export-memory", "-C", "strip=debuginfo" };
+
+static const std::string& getBuildStamp(bool rust)
+{
+        auto make = [](const std::vector<std::string>& flags)
+        {
+                std::string key = getSdkHash();
+                for (const auto& flag : flags)
+                {
+                        key += '\0';
+                        key += flag;
+                }
+                return fnv1aHex(reinterpret_cast<const unsigned char*>(key.data()), reinterpret_cast<const unsigned char*>(key.data() + key.size()));
+        };
+        static const std::string s_cpp = make(g_cppFlags);
+        static const std::string s_rust = make(g_rustFlags);
+        return rust ? s_rust : s_cpp;
+}
+
+static bool isBuildStampCurrent(const std::string& wasmPath, bool rust)
 {
         FILE* f = fopen((wasmPath + ".sdk").c_str(), "rb");
         if (!f)
@@ -2305,15 +2325,16 @@ static bool isBuiltWithCurrentSdk(const std::string& wasmPath)
         char buf[17] = { };
         size_t n = fread(buf, 1, 16, f);
         fclose(f);
-        return n == 16 && getSdkHash() == buf;
+        return n == 16 && getBuildStamp(rust) == buf;
 }
 
-static void writeSdkStamp(const std::string& wasmPath)
+static void writeBuildStamp(const std::string& wasmPath, bool rust)
 {
         FILE* f = fopen((wasmPath + ".sdk").c_str(), "wb");
         if (!f)
                 return;
-        fwrite(getSdkHash().data(), 1, getSdkHash().size(), f);
+        const std::string& stamp = getBuildStamp(rust);
+        fwrite(stamp.data(), 1, stamp.size(), f);
         fclose(f);
 }
 
@@ -2460,7 +2481,10 @@ static bool compileRust(const std::string& rsPath, const std::string& wasmPath, 
                 return false;
         size_t slash = wasmPath.rfind('/');
         std::string outDir = slash == std::string::npos ? std::string(".") : wasmPath.substr(0, slash);
-        auto result = fx::spawnProgram({ "rustc", "--crate-type", "cdylib", "--edition", "2021", "-O", "--target", "wasm32-wasip1", "-C", "link-args=--export-memory", "--extern", "cfx=" + rlib, rsPath, "--out-dir", outDir, "--emit=link=" + wasmPath + ",dep-info=" + wasmPath + ".d" }, 1048576, 120000);
+        std::vector<std::string> args{ "rustc" };
+        args.insert(args.end(), g_rustFlags.begin(), g_rustFlags.end());
+        args.insert(args.end(), { "--extern", "cfx=" + rlib, rsPath, "--out-dir", outDir, "--emit=link=" + wasmPath + ",dep-info=" + wasmPath + ".d" });
+        auto result = fx::spawnProgram(args, 1048576, 120000);
         std::string reason;
         if (processFailed(result, reason))
         {
@@ -2634,11 +2658,13 @@ static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, 
                         sources.push_back(helper);
                 }
         }
-        std::vector<std::string> args{ "zig", "c++", "-target", "wasm32-wasi", "-std=c++23", "-O2", "-fno-exceptions", "-mexec-model=reactor", "-Wl,--export-memory", "-I" + sdkPath };
+        std::vector<std::string> args{ "zig", "c++" };
+        args.insert(args.end(), g_cppFlags.begin(), g_cppFlags.end());
+        args.push_back("-I" + sdkPath);
         args.insert(args.end(), sources.begin(), sources.end());
         args.push_back("-o");
         args.push_back(wasmPath);
-        auto result = fx::spawnProgram(args, 1048576, 60000);
+        auto result = fx::spawnProgram(args, 1048576, 300000);
         std::string reason;
         if (processFailed(result, reason))
         {
@@ -2668,7 +2694,7 @@ static bool compileResource(const std::string& sourcePath, const std::string& wa
 {
         bool ok = rust ? compileRust(sourcePath, wasmFile, sdkPath, resourceName) : compileCpp(sourcePath, wasmFile, sdkPath, resourceName, root);
         if (ok)
-                writeSdkStamp(wasmFile);
+                writeBuildStamp(wasmFile, rust);
         return ok;
 }
 
@@ -2812,7 +2838,7 @@ result_t OM_DECL WasmScriptRuntime::LoadFile(char* scriptFile)
                         std::lock_guard<std::mutex> lk(g_compileJobsMutex);
                         compiling = g_compileJobs.count(wasmFile) != 0;
                 }
-                bool stale = compiling || !fileExists(wasmFile) || isNewer(resolvedPath, wasmFile) || depsChanged(wasmFile) || !isBuiltWithCurrentSdk(wasmFile);
+                bool stale = compiling || !fileExists(wasmFile) || isNewer(resolvedPath, wasmFile) || depsChanged(wasmFile) || !isBuildStampCurrent(wasmFile, file.ends_with(".rs"));
                 if (stale && !g_serverTicking.load(std::memory_order_relaxed))
                 {
                         LogInfo("Compiling '%s' in resource '%s'...", scriptFile, m_resourceName.c_str());

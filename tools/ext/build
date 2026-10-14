@@ -19,6 +19,7 @@ case "$SRC" in
                         -fno-exceptions \
                         -mexec-model=reactor \
                         -I"$SDK_DIR" \
+                        -g0 \
                         -Wl,--export-memory \
                         "$SRC" "$@" \
                         -o "$OUT"
@@ -38,6 +39,7 @@ case "$SRC" in
                 exec rustc --crate-type cdylib --edition 2021 -O \
                         --target wasm32-wasip1 \
                         -C link-args=--export-memory \
+                        -C strip=debuginfo \
                         --extern cfx="$RLIB" \
                         "$SRC" -o "$OUT"
                 ;;

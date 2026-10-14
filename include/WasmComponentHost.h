@@ -441,7 +441,7 @@ inline const std::vector<std::string>& cachedFilteredEnv()
         return s_env;
 }
 
-inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv, bool searchPath, size_t maxOutputBytes, int timeoutMs)
+inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv, bool searchPath, size_t maxOutputBytes, int timeoutMs, bool killOnOutputCap)
 {
         ProcessResult result{ };
         int pipefd[2];
@@ -506,7 +506,7 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
                 {
                         if (waitpid(pid, &wstatus, WNOHANG) != 0)
                         {
-                                while (!outputCapped)
+                                while (!(outputCapped && killOnOutputCap))
                                 {
                                         ssize_t dn = read(pipefd[0], buf, sizeof(buf));
                                         if (dn < 0 && errno == EINTR)
@@ -531,22 +531,18 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
                 if (n <= 0)
                         break;
                 size_t avail = maxOutputBytes > result.output.size() ? maxOutputBytes - result.output.size() : 0;
-                if (avail == 0)
-                {
-                        outputCapped = true;
-                        break;
-                }
                 size_t toAppend = static_cast<size_t>(n) < avail ? static_cast<size_t>(n) : avail;
                 result.output.append(buf, toAppend);
                 if (toAppend < static_cast<size_t>(n))
                 {
                         outputCapped = true;
-                        break;
+                        if (killOnOutputCap)
+                                break;
                 }
         }
         close(pipefd[0]);
         pid_t wp = waitpid(pid, &wstatus, WNOHANG);
-        if (wp == 0 && !timedOut && !outputCapped)
+        if (wp == 0 && !timedOut && !(outputCapped && killOnOutputCap))
         {
                 while ((wp = waitpid(pid, &wstatus, WNOHANG)) == 0 && std::chrono::steady_clock::now() < deadline)
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -591,7 +587,7 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
 inline ProcessResult spawnProcess(const std::string& command, size_t maxOutputBytes = 1048576, int timeoutMs = 30000)
 {
         const char* argv[] = { "sh", "-c", command.c_str(), nullptr };
-        return spawnProcessImpl("/bin/sh", argv, false, maxOutputBytes, timeoutMs);
+        return spawnProcessImpl("/bin/sh", argv, false, maxOutputBytes, timeoutMs, true);
 }
 
 inline ProcessResult spawnProgram(const std::vector<std::string>& args, size_t maxOutputBytes = 1048576, int timeoutMs = 30000)
@@ -606,7 +602,7 @@ inline ProcessResult spawnProgram(const std::vector<std::string>& args, size_t m
         for (const auto& a : args)
                 argv.push_back(a.c_str());
         argv.push_back(nullptr);
-        return spawnProcessImpl(argv[0], argv.data(), true, maxOutputBytes, timeoutMs);
+        return spawnProcessImpl(argv[0], argv.data(), true, maxOutputBytes, timeoutMs, false);
 }
 
 }
