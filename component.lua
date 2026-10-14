@@ -5,7 +5,7 @@ if not os.isfile(("%s/lib/libwasmtime.a"):format(wasmtime_dir)) then
         os.execute("tools/ext/wasmtime")
 end
 
-if not os.isdir(("%s/src/natives"):format(cwd)) then
+if not os.isfile(("%s/src/natives/types.h"):format(cwd)) then
         os.execute("python3 tools/native_db.py")
 end
 

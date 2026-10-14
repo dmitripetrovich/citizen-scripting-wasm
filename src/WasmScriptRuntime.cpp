@@ -35,7 +35,6 @@ static constexpr int EPOCH_TICK_MS = 10;
 static constexpr uint64_t WASM_CALL_TIMEOUT_TICKS = 5000 / EPOCH_TICK_MS;
 static constexpr int WORKER_STOP_TIMEOUT_MS = 1000;
 static constexpr size_t MAX_BOOKMARKS_PER_RESOURCE = 1024;
-static constexpr size_t MIN_NATIVE_PTR_BOUNDS = 4096;
 
 static std::string GetResourcePath(IScriptHost* host, const std::string& name)
 {
@@ -455,6 +454,56 @@ static wasm_trap_t* CbTrace(void* env, wasmtime_caller_t* caller, const wasmtime
         return nullptr;
 }
 
+struct NativeTypeInfo
+{
+        uint64_t hash;
+        const char* args;
+        const char* results;
+};
+
+#include "natives/types.h"
+
+static const NativeTypeInfo* FindNativeType(uint64_t hash)
+{
+        auto it = std::lower_bound(std::begin(g_nativeTypes), std::end(g_nativeTypes), hash, [](const NativeTypeInfo& info, uint64_t h) { return info.hash < h; });
+        return it != std::end(g_nativeTypes) && it->hash == hash ? it : nullptr;
+}
+
+static bool IsPointerKind(char kind)
+{
+        return kind == 's' || kind == 'b' || kind == 'p' || kind == 'v';
+}
+
+static std::string TranslateNativeArgs(const WasmMem& mem, std::string_view kinds, const WasmNativeCtx& wctx, fxNativeContext& hostCtx)
+{
+        for (size_t i = 0; i < kinds.size(); ++i)
+        {
+                uint64_t value = wctx.args[i];
+                if (!IsPointerKind(kinds[i]))
+                {
+                        hostCtx.arguments[i] = kinds[i] == 'l' ? value : (value & 0xFFFFFFFFu);
+                        continue;
+                }
+                uint32_t off = static_cast<uint32_t>(value);
+                int64_t len = kinds[i] == 'b' && i + 1 < kinds.size() ? static_cast<int32_t>(wctx.args[i + 1]) : -1;
+                bool valid;
+                if (off == 0)
+                        valid = kinds[i] == 's' || (kinds[i] == 'b' && len <= 0);
+                else if (kinds[i] == 'p')
+                        valid = mem.check(off, 8);
+                else if (kinds[i] == 'v')
+                        valid = mem.check(off, 24);
+                else if (len >= 0)
+                        valid = mem.check(off, static_cast<size_t>(len));
+                else
+                        valid = off < mem.sz && memchr(mem.base + off, 0, mem.sz - off) != nullptr;
+                if (!valid)
+                        return "argument " + std::to_string(i) + " does not point to valid wasm memory";
+                hostCtx.arguments[i] = off == 0 ? 0 : reinterpret_cast<uintptr_t>(mem.base + off);
+        }
+        return { };
+}
+
 static wasm_trap_t* CbInvokeNative(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t*, size_t)
 {
         auto* mod = static_cast<WasmModule*>(env);
@@ -468,52 +517,51 @@ static wasm_trap_t* CbInvokeNative(void* env, wasmtime_caller_t* caller, const w
                 return nullptr;
         WasmNativeCtx wctx{ };
         memcpy(&wctx, mem.base + ctxPtr, sizeof(WasmNativeCtx));
+        const NativeTypeInfo* info = FindNativeType(wctx.hash);
+        std::string_view argKinds = info ? info->args : "";
+        std::string_view resultKinds = info ? info->results : "";
         fxNativeContext hostCtx{ };
         hostCtx.nativeIdentifier = wctx.hash;
-        if (wctx.numArgs > 32)
-                wctx.numArgs = 32;
-        if (wctx.numResults > 32)
-                wctx.numResults = 32;
-        hostCtx.numArguments = static_cast<int>(wctx.numArgs);
-        hostCtx.numResults = static_cast<int>(wctx.numResults);
-        for (uint32_t i = 0; i < wctx.numArgs; ++i)
-        {
-                if ((wctx.ptrMask >> i) & 1u)
-                {
-                        uint32_t off = static_cast<uint32_t>(wctx.args[i]);
-                        if (off == 0)
-                                hostCtx.arguments[i] = 0;
-                        else if (!mem.check(off, MIN_NATIVE_PTR_BOUNDS))
-                                return nullptr;
-                        else
-                                hostCtx.arguments[i] = reinterpret_cast<uintptr_t>(mem.base + off);
-                }
-                else
-                {
-                        hostCtx.arguments[i] = static_cast<uintptr_t>(wctx.args[i]);
-                }
-        }
-        mod->lastNativeError.clear();
-        if (rt->host() && FX_FAILED(rt->host()->InvokeNative(hostCtx)))
+        hostCtx.numArguments = static_cast<int>(argKinds.size());
+        hostCtx.numResults = static_cast<int>(resultKinds.size());
+        if (!info)
+                mod->lastNativeError = "native is not in the native type table";
+        else if (!rt->host())
+                mod->lastNativeError = "script host is gone";
+        else
+                mod->lastNativeError = TranslateNativeArgs(mem, argKinds, wctx, hostCtx);
+        if (mod->lastNativeError.empty() && FX_FAILED(rt->host()->InvokeNative(hostCtx)))
         {
                 char* errorText = nullptr;
                 rt->host()->GetLastErrorText(&errorText);
                 mod->lastNativeError = errorText && *errorText ? errorText : "unknown error";
+        }
+        if (!mod->lastNativeError.empty())
+        {
                 char hash[19];
                 snprintf(hash, sizeof(hash), "0x%016llx", static_cast<unsigned long long>(wctx.hash));
                 ScriptPrint(rt->host(), rt->resourceName(), "^1SCRIPT ERROR: @" + rt->resourceName() + "/" + mod->scriptFile + ": native " + hash + " failed: " + mod->lastNativeError + "^7");
                 std::fill(std::begin(hostCtx.arguments), std::end(hostCtx.arguments), 0);
         }
         mod->lastNativeCtx = hostCtx;
-        uint32_t validResultMask = (wctx.numResults >= 32) ? 0xFFFFFFFFu : ((1u << wctx.numResults) - 1);
-        mod->lastResultPtrMask = wctx.resultPtrMask & validResultMask;
+        mod->lastResultPtrMask = 0;
         mod->hasValidNativeResult = true;
-        for (uint32_t i = 0; i < wctx.numResults; ++i)
+        size_t numResults = std::max<size_t>(std::min<uint32_t>(wctx.numResults, 32), resultKinds.size());
+        for (size_t i = 0; i < numResults; ++i)
         {
-                if ((wctx.resultPtrMask >> i) & 1u)
-                        wctx.args[i] = (hostCtx.arguments[i] != 0) ? 1 : 0;
+                uint64_t value = hostCtx.arguments[i];
+                char kind = i < resultKinds.size() ? resultKinds[i] : '\0';
+                if (IsPointerKind(kind))
+                {
+                        mod->lastResultPtrMask |= 1u << i;
+                        wctx.args[i] = value != 0 ? 1 : 0;
+                }
+                else if (kind == 'l')
+                        wctx.args[i] = value;
+                else if (kind == 'i')
+                        wctx.args[i] = value & 0xFFFFFFFFu;
                 else
-                        wctx.args[i] = static_cast<uint64_t>(hostCtx.arguments[i]);
+                        wctx.args[i] = 0;
         }
         if (!mem.init(caller))
                 return nullptr;

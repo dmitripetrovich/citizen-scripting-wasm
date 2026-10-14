@@ -364,6 +364,74 @@ def generate_rust_namespace_block(namespace: str, natives: list[dict]) -> tuple[
         return ns_lower, body, len(wrappers)
 
 
+SCALAR_KINDS = {
+        "int": "i", "float": "i", "BOOL": "i", "bool": "i", "Hash": "i", "Entity": "i", "Player": "i",
+        "Vehicle": "i", "Ped": "i", "Object": "i", "Pickup": "i", "Blip": "i", "Cam": "i", "FireId": "i",
+        "Interior": "i", "ScrHandle": "i", "Any": "i", "long": "l", "Vector3": "iii",
+}
+
+
+def native_type_kinds(native: dict) -> tuple[str, str] | None:
+        params = native.get("params", [])
+        args = ""
+        for i, p in enumerate(params):
+                ptype = p.get("type", "")
+                if ptype in SCALAR_KINDS:
+                        args += SCALAR_KINDS[ptype]
+                elif ptype == "char*":
+                        nxt = params[i + 1] if i + 1 < len(params) else None
+                        sized = nxt is not None and nxt.get("type") in ("int", "long") and nxt.get("name", "").lower().endswith("length")
+                        args += "b" if sized else "s"
+                elif ptype == "func":
+                        args += "s"
+                elif ptype == "object":
+                        args += "bi"
+                elif ptype == "Vector3*":
+                        args += "v"
+                elif ptype.endswith("*") and ptype.rstrip("*") in SCALAR_KINDS:
+                        args += "p"
+                else:
+                        return None
+        result = native.get("results", "void")
+        if result == "void":
+                results = ""
+        elif result in SCALAR_KINDS:
+                results = SCALAR_KINDS[result]
+        elif result == "char*":
+                results = "s"
+        elif result == "object":
+                results = "bi"
+        elif result.endswith("*"):
+                results = "p"
+        else:
+                return None
+        if len(args) > 32 or len(results) > 32:
+                return None
+        return args, results
+
+
+def generate_type_table(natives: list[dict]) -> tuple[str, int]:
+        table: dict[int, tuple[str, str]] = {}
+        for n in natives:
+                try:
+                        h = int(n.get("hash", ""), 16)
+                except ValueError:
+                        continue
+                kinds = native_type_kinds(n)
+                if kinds is None:
+                        continue
+                if h in table and table[h] != kinds:
+                        print(f"Conflicting signatures for native 0x{h:X}, leaving it out of the type table")
+                        table[h] = None
+                        continue
+                table.setdefault(h, kinds)
+        rows = [f"        {{ 0x{h:016X}ULL, \"{a}\", \"{r}\" }}," for h, k in sorted(table.items()) if k is not None for a, r in [k]]
+        out = "// Auto-generated, do not edit.\n#pragma once\n\nstatic constexpr NativeTypeInfo g_nativeTypes[] = {\n"
+        out += "\n".join(rows)
+        out += "\n};\n"
+        return out, len(rows)
+
+
 def embed_sdk(base_dir, output):
         files = [
                 "include/CppSdk.h",
@@ -401,12 +469,17 @@ def main():
         no_cache = args.no_cache
         os.makedirs(output_dir, exist_ok=True)
         all_ns: dict[str, list[dict]] = {}
+        cfx_natives: list[dict] = []
         try:
                 cfx_data = fetch_json(CFX_URL, no_cache)
                 for ns, natives in parse_cfx_natives(cfx_data).items():
                         all_ns.setdefault(ns, []).extend(natives)
+                        cfx_natives.extend(natives)
         except Exception as e:
                 print(f"Failed to fetch CFX natives: {e}")
+        if not cfx_natives:
+                print("The native type table needs the CFX natives")
+                sys.exit(1)
         for game in games:
                 try:
                         game_data = fetch_json(GAME_URLS[game], no_cache)
@@ -455,7 +528,7 @@ def main():
                         print(f"  {ns}: {rs_count} Rust wrappers")
 
         for f in os.listdir(output_dir):
-                if f.endswith(".h") and f != "all.h":
+                if f.endswith(".h") and f not in ("all.h", "types.h"):
                         os.remove(os.path.join(output_dir, f))
 
         all_h = "// Auto-generated, do not edit.\n#pragma once\n\nnamespace cfx::natives\n{\n\n"
@@ -470,7 +543,11 @@ def main():
         with open(os.path.join(output_dir, "all.rs"), "w") as f:
                 f.write("\n".join(rust_lines))
 
-        print(f"\nGenerated {total_count} C++ wrappers, {rust_total} Rust wrappers across {ns_count} namespaces")
+        types_h, types_count = generate_type_table(cfx_natives)
+        with open(os.path.join(output_dir, "types.h"), "w") as f:
+                f.write(types_h)
+
+        print(f"\nGenerated {total_count} C++ wrappers, {rust_total} Rust wrappers across {ns_count} namespaces, {types_count} native types")
         print(f"Output: {output_dir}/")
 
         embed_sdk(base_dir, args.embed)

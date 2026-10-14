@@ -25,6 +25,7 @@ The runtime plugin (`libcitizen-scripting-wasm.so`) is loaded by FXServer and ha
 - Child process spawning requires `set sv_wasmChildProcess "resource-name"` (or `"*"` for all) in .cfg.
 - Worker threads require `set sv_wasmWorkerThreads "resource-name"` (or `"*"` for all) in .cfg.
 - Resources are limited to 256MB of linear memory.
+- Native calls are checked against the argument types in the CFX native database, natives missing from it are rejected.
 - Net events are filtered, only events registered with `cfx::onNet` / `cfx::on_net` accept calls from clients.
 - Worker threads are capped at 8 per resource.
 - Timers are capped at 8192 per resource.
