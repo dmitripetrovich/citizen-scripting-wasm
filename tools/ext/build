@@ -10,38 +10,32 @@ shift
 SDK_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT=${SRC%.*}.wasm
 
+read_flags() {
+        mapfile -t FLAGS < <(sed -n "s/^static const std::vector<std::string> $1 = { \(.*\) };\$/\1/p" "$SDK_DIR/src/WasmScriptRuntime.cpp" | grep -o '"[^"]*"' | tr -d '"')
+        [[ ${#FLAGS[@]} -gt 0 ]] || { echo "Error: $1 not found in src/WasmScriptRuntime.cpp" >&2; exit 1; }
+}
+
 case "$SRC" in
         *.cpp)
-                exec zig c++ \
-                        -target wasm32-wasi \
-                        -std=c++23 \
-                        -O2 \
-                        -fno-exceptions \
-                        -mexec-model=reactor \
-                        -I"$SDK_DIR" \
-                        -g0 \
-                        -Wl,--export-memory \
-                        "$SRC" "$@" \
-                        -o "$OUT"
+                read_flags g_cppFlags
+                zig c++ "${FLAGS[@]}" -I"$SDK_DIR" "$SRC" "$@" -o "$OUT"
+                python3 "$SDK_DIR/tools/ext/debug" "$OUT"
                 ;;
         *.rs)
                 [[ $# -eq 0 ]] || { echo "Error: Rust helpers are pulled in with mod, pass only the script" >&2; exit 2; }
                 RLIB="$SDK_DIR/build/libcfx.rlib"
                 RLIB_SRC="$SDK_DIR/include/RustSdk.rs"
+                read_flags g_rlibFlags
+                RLIB_KEY="$(rustc -V) ${FLAGS[*]}"
 
-                if [[ ! -f "$RLIB" ]] || [[ "$RLIB_SRC" -nt "$RLIB" ]]; then
+                if [[ ! -f "$RLIB" ]] || [[ "$RLIB_SRC" -nt "$RLIB" ]] || [[ "$(cat "$RLIB.key" 2>/dev/null)" != "$RLIB_KEY" ]]; then
                         mkdir -p "$(dirname "$RLIB")"
-                        rustc --crate-type rlib --crate-name cfx --edition 2021 -O \
-                                --target wasm32-wasip1 --cfg cfx_has_natives \
-                                "$RLIB_SRC" -o "$RLIB"
+                        rustc "${FLAGS[@]}" "$RLIB_SRC" -o "$RLIB"
+                        printf '%s' "$RLIB_KEY" > "$RLIB.key"
                 fi
 
-                exec rustc --crate-type cdylib --edition 2021 -O \
-                        --target wasm32-wasip1 \
-                        -C link-args=--export-memory \
-                        -C strip=debuginfo \
-                        --extern cfx="$RLIB" \
-                        "$SRC" -o "$OUT"
+                read_flags g_rustFlags
+                exec rustc "${FLAGS[@]}" --extern cfx="$RLIB" "$SRC" -o "$OUT"
                 ;;
         *)
                 echo "Error: Unsupported file type: $SRC (expected .cpp or .rs)" >&2

@@ -424,7 +424,7 @@ inline const std::vector<std::string>& cachedFilteredEnv()
         return s_env;
 }
 
-inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv, bool searchPath, size_t maxOutputBytes, int timeoutMs, bool killOnOutputCap)
+inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv, bool searchPath, size_t maxOutputBytes, int timeoutMs, bool killOnOutputCap, const std::atomic<bool>* cancel)
 {
         ProcessResult result{ };
         int pipefd[2];
@@ -477,7 +477,7 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
         {
                 auto now = std::chrono::steady_clock::now();
                 int remainingMs = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
-                if (remainingMs <= 0)
+                if (remainingMs <= 0 || (cancel && cancel->load(std::memory_order_relaxed)))
                 {
                         timedOut = true;
                         break;
@@ -527,7 +527,7 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
         pid_t wp = waitpid(pid, &wstatus, WNOHANG);
         if (wp == 0 && !timedOut && !(outputCapped && killOnOutputCap))
         {
-                while ((wp = waitpid(pid, &wstatus, WNOHANG)) == 0 && std::chrono::steady_clock::now() < deadline)
+                while ((wp = waitpid(pid, &wstatus, WNOHANG)) == 0 && std::chrono::steady_clock::now() < deadline && !(cancel && cancel->load(std::memory_order_relaxed)))
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 if (wp == 0)
                         timedOut = true;
@@ -567,10 +567,10 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
         return result;
 }
 
-inline ProcessResult spawnProcess(const std::string& command, size_t maxOutputBytes = 1048576, int timeoutMs = 30000)
+inline ProcessResult spawnProcess(const std::string& command, size_t maxOutputBytes = 1048576, int timeoutMs = 30000, const std::atomic<bool>* cancel = nullptr)
 {
         const char* argv[] = { "sh", "-c", command.c_str(), nullptr };
-        return spawnProcessImpl("/bin/sh", argv, false, maxOutputBytes, timeoutMs, true);
+        return spawnProcessImpl("/bin/sh", argv, false, maxOutputBytes, timeoutMs, true, cancel);
 }
 
 inline ProcessResult spawnProgram(const std::vector<std::string>& args, size_t maxOutputBytes = 1048576, int timeoutMs = 30000)
@@ -585,7 +585,7 @@ inline ProcessResult spawnProgram(const std::vector<std::string>& args, size_t m
         for (const auto& a : args)
                 argv.push_back(a.c_str());
         argv.push_back(nullptr);
-        return spawnProcessImpl(argv[0], argv.data(), true, maxOutputBytes, timeoutMs, false);
+        return spawnProcessImpl(argv[0], argv.data(), true, maxOutputBytes, timeoutMs, false, nullptr);
 }
 
 }

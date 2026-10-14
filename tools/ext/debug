@@ -1,0 +1,48 @@
+#!/usr/bin/env python3
+import os
+import sys
+
+
+def read_leb(data, pos):
+        result = 0
+        shift = 0
+        while True:
+                byte = data[pos]
+                pos += 1
+                result |= (byte & 0x7F) << shift
+                shift += 7
+                if byte < 0x80:
+                        return result, pos
+
+
+def main():
+        if len(sys.argv) != 2:
+                sys.exit("Usage: debug <module.wasm>")
+        path = sys.argv[1]
+        with open(path, "rb") as f:
+                data = f.read()
+        if data[:4] != b"\0asm":
+                sys.exit(f"Error: {path} is not a wasm module")
+        out = bytearray(data[:8])
+        pos = 8
+        while pos < len(data):
+                start = pos
+                size, pos = read_leb(data, pos + 1)
+                end = pos + size
+                if data[start] == 0:
+                        name_len, name_pos = read_leb(data, pos)
+                        if data[name_pos:name_pos + name_len].startswith(b".debug_"):
+                                pos = end
+                                continue
+                out += data[start:end]
+                pos = end
+        if len(out) == len(data):
+                return
+        tmp = path + ".strip"
+        with open(tmp, "wb") as f:
+                f.write(out)
+        os.replace(tmp, path)
+
+
+if __name__ == "__main__":
+        main()

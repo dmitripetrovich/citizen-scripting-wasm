@@ -1771,6 +1771,7 @@ using HttpCallback = std::function<void(int statusCode, const std::string& body,
 extern "C" {
         __attribute__((import_module("cfx"), import_name("trace"))) void __cfxTrace(const char* ptr, uint32_t len);
         __attribute__((import_module("cfx"), import_name("invoke_native"))) void __cfxInvokeNative(uint32_t ctx_ptr);
+        __attribute__((import_module("cfx"), import_name("get_last_native_error"))) int32_t __cfxGetLastNativeError(char* buf, int32_t buf_max);
         __attribute__((import_module("cfx"), import_name("copy_string_result"))) int32_t __cfxCopyStringResult(uint32_t ctx_ptr, int32_t result_idx, char* buf, int32_t buf_max);
         __attribute__((import_module("cfx"), import_name("copy_binary_result"))) int32_t __cfxCopyBinaryResult(uint32_t ctx_ptr, int32_t ptr_result_idx, int32_t size_result_idx, char* buf, int32_t buf_max);
         __attribute__((import_module("cfx"), import_name("emit_event"))) void __cfxEmitEvent(const char* name, uint32_t name_len, const uint8_t* args, uint32_t args_len);
@@ -2291,6 +2292,16 @@ inline TResult native(const char* name, TArgs&&... args)
         return cfx::natives::invoke<TResult>(HashString(name), std::forward<TArgs>(args)...);
 }
 
+inline std::string lastNativeError()
+{
+        int32_t len = __cfxGetLastNativeError(nullptr, 0);
+        if (len <= 0)
+                return { };
+        std::string out(static_cast<size_t>(len), '\0');
+        __cfxGetLastNativeError(out.data(), len + 1);
+        return out;
+}
+
 template<typename F>
 inline int32_t on(const std::string& event, F&& handler)
 {
@@ -2418,26 +2429,20 @@ __attribute__((format(printf, 1, 2)))
 inline void trace(const char* fmt, TArgs&&... args)
 {
         static_assert((... && (std::is_trivially_copyable_v<std::decay_t<TArgs>>)), "cfx::trace arguments must be trivially copyable (use .c_str() for std::string)");
-        if constexpr (sizeof...(args) == 0)
+        if (!fmt)
+                return;
+        char stackBuf[256];
+        int len = snprintf(stackBuf, sizeof(stackBuf), fmt, std::forward<TArgs>(args)...);
+        if (len <= 0)
+                return;
+        if (static_cast<size_t>(len) < sizeof(stackBuf))
         {
-                if (fmt && fmt[0])
-                        __cfxTrace(fmt, static_cast<uint32_t>(strlen(fmt)));
+                __cfxTrace(stackBuf, static_cast<uint32_t>(len));
+                return;
         }
-        else
-        {
-                char stackBuf[256];
-                int len = snprintf(stackBuf, sizeof(stackBuf), fmt, std::forward<TArgs>(args)...);
-                if (len < 0)
-                        return;
-                if (static_cast<size_t>(len) < sizeof(stackBuf))
-                {
-                        __cfxTrace(stackBuf, static_cast<uint32_t>(len));
-                        return;
-                }
-                std::string buf(static_cast<size_t>(len), '\0');
-                snprintf(buf.data(), buf.size() + 1, fmt, std::forward<TArgs>(args)...);
-                __cfxTrace(buf.data(), static_cast<uint32_t>(buf.size()));
-        }
+        std::string buf(static_cast<size_t>(len), '\0');
+        snprintf(buf.data(), buf.size() + 1, fmt, std::forward<TArgs>(args)...);
+        __cfxTrace(buf.data(), static_cast<uint32_t>(buf.size()));
 }
 
 inline void traceStr(const std::string& msg)
@@ -2451,50 +2456,27 @@ __attribute__((format(printf, 1, 2)))
 inline void traceLn(const char* fmt, TArgs&&... args)
 {
         static_assert((... && (std::is_trivially_copyable_v<std::decay_t<TArgs>>)), "cfx::traceLn arguments must be trivially copyable (use .c_str() for std::string)");
-        if constexpr (sizeof...(args) == 0)
+        if (!fmt)
         {
-                if (!fmt || !fmt[0])
-                {
-                        __cfxTrace("\n", 1);
-                        return;
-                }
-                size_t n = strlen(fmt);
-                if (fmt[n - 1] == '\n')
-                {
-                        __cfxTrace(fmt, static_cast<uint32_t>(n));
-                        return;
-                }
-                if (n + 1 <= 256)
-                {
-                        char stackBuf[257];
-                        memcpy(stackBuf, fmt, n);
-                        stackBuf[n] = '\n';
-                        __cfxTrace(stackBuf, static_cast<uint32_t>(n + 1));
-                        return;
-                }
-                std::string buf(fmt, n);
-                buf.push_back('\n');
-                __cfxTrace(buf.data(), static_cast<uint32_t>(buf.size()));
+                __cfxTrace("\n", 1);
+                return;
         }
-        else
+        char stackBuf[256];
+        int len = snprintf(stackBuf, sizeof(stackBuf), fmt, std::forward<TArgs>(args)...);
+        if (len < 0)
+                return;
+        if (static_cast<size_t>(len) + 1 < sizeof(stackBuf))
         {
-                char stackBuf[256];
-                int len = snprintf(stackBuf, sizeof(stackBuf), fmt, std::forward<TArgs>(args)...);
-                if (len < 0)
-                        return;
-                if (static_cast<size_t>(len) + 1 < sizeof(stackBuf))
-                {
-                        if (len == 0 || stackBuf[len - 1] != '\n')
-                                stackBuf[len++] = '\n';
-                        __cfxTrace(stackBuf, static_cast<uint32_t>(len));
-                        return;
-                }
-                std::string buf(static_cast<size_t>(len) + 1, '\0');
-                snprintf(buf.data(), buf.size(), fmt, std::forward<TArgs>(args)...);
-                if (buf[len - 1] != '\n')
-                        buf[len++] = '\n';
-                __cfxTrace(buf.data(), static_cast<uint32_t>(len));
+                if (len == 0 || stackBuf[len - 1] != '\n')
+                        stackBuf[len++] = '\n';
+                __cfxTrace(stackBuf, static_cast<uint32_t>(len));
+                return;
         }
+        std::string buf(static_cast<size_t>(len) + 1, '\0');
+        snprintf(buf.data(), buf.size(), fmt, std::forward<TArgs>(args)...);
+        if (buf[len - 1] != '\n')
+                buf[len++] = '\n';
+        __cfxTrace(buf.data(), static_cast<uint32_t>(len));
 }
 #pragma clang diagnostic pop
 
@@ -3274,7 +3256,10 @@ inline ProcessResult pollProcess(int32_t processId, int32_t maxOutput = 4096)
         int32_t                                                                                             \
         name(intptr_t ip, int32_t il, intptr_t rp, int32_t rm)                                              \
         {                                                                                                   \
-                return name##_impl(reinterpret_cast<const char*>(ip), il, reinterpret_cast<char*>(rp), rm); \
+                setvbuf(stdout, nullptr, _IOLBF, 0);                                                        \
+                int32_t ret = name##_impl(reinterpret_cast<const char*>(ip), il, reinterpret_cast<char*>(rp), rm); \
+                fflush(stdout);                                                                             \
+                return ret;                                                                                 \
         }                                                                                                   \
         static int32_t name##_impl(const char* input, int32_t input_len, char* result, int32_t result_max)
 
@@ -3454,6 +3439,7 @@ void cfx_main();
 CFX_WASM_EXPORT(__cfx_init)
 void __cfx_init()
 {
+        setvbuf(stdout, nullptr, _IOLBF, 0);
         static fxw_internal::Context s_ctx;
         fxw_internal::currentContext() = &s_ctx;
         {

@@ -87,6 +87,8 @@ extern "C" {
         fn __cfx_invoke_function_reference(ref_str: *const u8, ref_len: u32, args: *const u8, args_len: u32, out: *mut [u32; 2]);
         #[link_name = "get_instance_id"]
         fn __cfx_get_instance_id() -> i32;
+        #[link_name = "get_last_native_error"]
+        fn __cfx_get_last_native_error(buf: *mut u8, buf_max: i32) -> i32;
         #[link_name = "spawn_process"]
         fn __cfx_spawn_process(cmd: *const u8, cmd_len: u32) -> i32;
         #[link_name = "poll_process"]
@@ -728,6 +730,17 @@ pub fn get_string_result(ctx: &NativeCtx, result_idx: i32) -> String {
                 __cfx_copy_string_result(ctx as *const NativeCtx as u32, result_idx, buf.as_mut_ptr(), len + 1);
                 buf.truncate(len as usize);
                 String::from_utf8(buf).unwrap_or_default()
+        }
+}
+
+pub fn last_native_error() -> String {
+        unsafe {
+                let len = __cfx_get_last_native_error(std::ptr::null_mut(), 0);
+                if len <= 0 { return String::new(); }
+                let mut buf = vec![0u8; (len + 1) as usize];
+                __cfx_get_last_native_error(buf.as_mut_ptr(), len + 1);
+                buf.truncate(len as usize);
+                String::from_utf8_lossy(&buf).into_owned()
         }
 }
 

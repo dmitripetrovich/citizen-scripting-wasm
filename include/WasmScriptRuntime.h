@@ -2,17 +2,6 @@
 
 #include "WasmComponentHost.h"
 
-static wasm_trap_t* CbInvokeNative(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-static wasm_trap_t* CbCopyStringResult(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-static wasm_trap_t* CbCopyBinaryResult(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-static wasm_trap_t* CbCancelEvent(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-static wasm_trap_t* CbWasEventCanceled(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-static wasm_trap_t* CbSpawnProcess(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-static wasm_trap_t* CbPollProcess(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-static wasm_trap_t* CbCreateRef(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-static wasm_trap_t* CbCreateWorker(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-static wasm_trap_t* CbPollWorker(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-
 namespace fx::cpp
 {
 
@@ -49,16 +38,6 @@ struct WasmModule;
 
 class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRuntime, IScriptTickRuntime, IScriptEventRuntime, IScriptRefRuntime, IScriptFileHandlingRuntime, IScriptTickRuntimeWithBookmarks, IScriptStackWalkingRuntime, IScriptMemInfoRuntime, IScriptWarningRuntime, IScriptProfiler>
 {
-        friend wasm_trap_t* ::CbInvokeNative(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-        friend wasm_trap_t* ::CbCopyStringResult(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-        friend wasm_trap_t* ::CbCopyBinaryResult(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-        friend wasm_trap_t* ::CbCancelEvent(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-        friend wasm_trap_t* ::CbWasEventCanceled(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-        friend wasm_trap_t* ::CbSpawnProcess(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-        friend wasm_trap_t* ::CbPollProcess(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-        friend wasm_trap_t* ::CbCreateRef(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-        friend wasm_trap_t* ::CbCreateWorker(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
-        friend wasm_trap_t* ::CbPollWorker(void*, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t);
         friend struct WasmModule;
 
     public:
@@ -132,6 +111,7 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
                 std::string resourceName;
                 const WasmModule* owner = nullptr;
                 std::atomic<bool> cancelled{ false };
+                std::string stdioBuffer;
         };
 
         static constexpr int32_t MAX_WORKERS_PER_RESOURCE = 8;
@@ -142,6 +122,7 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
                 bool done = false;
                 fx::ProcessResult result;
                 const WasmModule* owner = nullptr;
+                std::atomic<bool> cancelled{ false };
         };
 
         static constexpr int32_t MAX_PROCESSES_PER_RESOURCE = 8;
@@ -149,26 +130,10 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         void scheduleWasmBookmark(WasmModule& mod, int32_t wasmId, int32_t deadlineMs);
         static wasm_engine_t* engine();
 
-    private:
-        fx::OMPtr<IScriptHost> m_host;
-        fx::OMPtr<IScriptHostWithBookmarks> m_bookmarkHost;
-        fx::OMPtr<IScriptHostWithResourceData> m_metadataHost;
-        fx::OMPtr<IScriptHostWithManifest> m_manifestHost;
-        void* m_parentObject = nullptr;
-        int32_t m_instanceId = 0;
-        bool m_destroyed = false;
-        std::string m_resourceName;
-        WasmModule* m_activeModule = nullptr;
         std::unordered_map<int32_t, std::shared_ptr<WorkerState>> m_workers;
         int32_t m_nextWorkerId = 1;
         std::unordered_map<int32_t, std::shared_ptr<ProcessState>> m_processes;
         int32_t m_nextProcessId = 1;
-        std::unordered_map<int32_t, fx::RefCallback> m_refs;
-        int32_t m_nextRefIdx = 1;
-        int32_t allocRefIdx();
-        uint64_t m_nextBoundaryId = 1;
-        uint64_t nextBoundaryId();
-        std::vector<std::shared_ptr<WasmModule>> m_modules;
         struct WasmRef
         {
                 WasmModule* mod = nullptr;
@@ -183,6 +148,23 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         };
         std::shared_ptr<RefGuard> m_refGuard = std::make_shared<RefGuard>();
         bool m_eventCanceled = false;
+
+    private:
+        fx::OMPtr<IScriptHost> m_host;
+        fx::OMPtr<IScriptHostWithBookmarks> m_bookmarkHost;
+        fx::OMPtr<IScriptHostWithResourceData> m_metadataHost;
+        fx::OMPtr<IScriptHostWithManifest> m_manifestHost;
+        void* m_parentObject = nullptr;
+        int32_t m_instanceId = 0;
+        bool m_destroyed = false;
+        std::string m_resourceName;
+        WasmModule* m_activeModule = nullptr;
+        std::unordered_map<int32_t, fx::RefCallback> m_refs;
+        int32_t m_nextRefIdx = 1;
+        int32_t allocRefIdx();
+        uint64_t m_nextBoundaryId = 1;
+        uint64_t nextBoundaryId();
+        std::vector<std::shared_ptr<WasmModule>> m_modules;
         struct WasmBookmark
         {
                 WasmModule* mod = nullptr;
@@ -260,6 +242,9 @@ struct WasmModule : std::enable_shared_from_this<WasmModule>
         fxNativeContext lastNativeCtx{ };
         uint32_t lastResultPtrMask = 0;
         int32_t callDepth = 0;
+        bool limitExceeded = false;
+        std::string lastNativeError;
+        std::string stdioBuffer;
         std::unordered_map<int32_t, uint64_t> wasmToHostBookmark;
 
         uint8_t* wasmBase();
