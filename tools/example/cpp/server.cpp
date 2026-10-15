@@ -128,5 +128,5 @@ Server
                 cfx::json::Value info = cfx::callExport(name, "getPlayerInfo", { src });
                 cfx::trace("[cfx::addExport] %s\n", info.asStr("failed").c_str());
                 cfx::callExport("fw", "SendChatMessage", { src, "^#f0a0e4[INFO] ^#ffffffHello from ^#f0a0e4C++^#ffffff!" });
-        });
+        }, false);
 }

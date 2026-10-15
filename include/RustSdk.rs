@@ -481,18 +481,29 @@ type EventHandlerFn = Rc<dyn Fn(&str, &EventArgs)>;
 pub struct RawEventHandler;
 
 pub trait IntoEventHandler<M> {
-        fn into_event_handler(self) -> EventHandlerFn;
+        fn into_event_handler(self, event: &str) -> EventHandlerFn;
 }
 
 impl<F: Fn(&str, &EventArgs) + 'static> IntoEventHandler<RawEventHandler> for F {
-        fn into_event_handler(self) -> EventHandlerFn { Rc::new(self) }
+        fn into_event_handler(self, _event: &str) -> EventHandlerFn { Rc::new(self) }
+}
+
+fn report_arg_error(event: &str, error: ArgError) {
+        trace_str(&format!("event '{}' argument {}: {}, handler skipped\n", event, error.index + 1, error.reason));
 }
 
 macro_rules! impl_typed_event_handler {
         ($($t:ident $i:tt),*) => {
-                impl<F, $($t: FromEventArg),*> IntoEventHandler<($($t,)*)> for F where F: Fn(&str $(, $t)*) + 'static {
-                        fn into_event_handler(self) -> EventHandlerFn {
-                                Rc::new(move |source: &str, _args: &EventArgs| self(source $(, _args.get::<$t>($i))*))
+                impl<F, $($t: FromArg),*> IntoEventHandler<($($t,)*)> for F where F: Fn(&str $(, $t)*) + 'static {
+                        fn into_event_handler(self, event: &str) -> EventHandlerFn {
+                                let event = event.to_string();
+                                Rc::new(move |source: &str, _args: &EventArgs| {
+                                        let decoded = (|| -> Result<($($t,)*), ArgError> { Ok(($(decode_arg::<$t>(_args, $i)?,)*)) })();
+                                        match decoded {
+                                                Ok(_values) => self(source $(, _values.$i)*),
+                                                Err(error) => report_arg_error(&event, error),
+                                        }
+                                })
                         }
                 }
         };
@@ -777,7 +788,7 @@ pub fn on<M>(event: &str, handler: impl IntoEventHandler<M>) -> i32 {
         if token < 0 { return -1; }
         unsafe { (*c).events.entry(event.to_string()).or_default() }.push(EventHandlerEntry {
                 id: token,
-                handler: handler.into_event_handler(),
+                handler: handler.into_event_handler(event),
         });
         unsafe { (*c).handler_event_map.insert(token, event.to_string()) };
         if first {
@@ -1092,7 +1103,7 @@ fn resolve_export_ref(resource: &str, name: &str) -> String {
         result
 }
 
-pub fn on_command(command: &str, handler: impl Fn(&str, &[String]) + 'static) {
+pub fn on_command(command: &str, handler: impl Fn(&str, &[String]) + 'static, restricted: bool) {
         let cmd = command.to_string();
         let c = ctx();
         let handlers = unsafe { (*c).commands.entry(cmd.clone()).or_default() };
@@ -1118,7 +1129,7 @@ pub fn on_command(command: &str, handler: impl Fn(&str, &[String]) + 'static) {
         if cb_ref.is_empty() { return; }
         let cmd_cs = CString::new(command).unwrap_or_default();
         let ref_cs = CString::new(cb_ref).unwrap_or_default();
-        invoke_native_void(hash_string(b"REGISTER_COMMAND"), &[NativeArg::ptr(cmd_cs.as_ptr() as u64), NativeArg::ptr(ref_cs.as_ptr() as u64), NativeArg::val(0)]);
+        invoke_native_void(hash_string(b"REGISTER_COMMAND"), &[NativeArg::ptr(cmd_cs.as_ptr() as u64), NativeArg::ptr(ref_cs.as_ptr() as u64), NativeArg::val(restricted as u64)]);
 }
 
 pub fn add_state_bag_change_handler(key_filter: &str, bag_filter: &str, handler: impl Fn(&str, &str, &Value, i32, bool) + 'static) -> i32 {
@@ -1945,7 +1956,6 @@ pub mod runtime {
 
                 for h in handlers {
                         h(src_str, &ea);
-                        if was_event_canceled() { break; }
                 }
         }
 

@@ -113,5 +113,5 @@ Server! {
                 let info = cfx::call_export(&name, "getPlayerInfo", &[cfx::Value::from(src)]);
                 cfx::trace!("[cfx::add_export] {}\n", info.as_str());
                 cfx::call_export("fw", "SendChatMessage", &[cfx::Value::from(src), cfx::Value::from("^#f0a0e4[INFO] ^#ffffffHello from ^#b7410eRust^#ffffff!")]);
-        });
+        }, false);
 }

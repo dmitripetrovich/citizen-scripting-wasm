@@ -1966,11 +1966,7 @@ struct Context
                 char eventCtx[256];
                 snprintf(eventCtx, sizeof(eventCtx), "event '%s'", key.c_str());
                 for (auto& h : snapshot)
-                {
                         safeInvoke([&] { h(srcStr, ea); }, resourceName.c_str(), eventCtx);
-                        if (__cfxWasEventCanceled())
-                                break;
-                }
         }
 };
 
@@ -2120,20 +2116,27 @@ struct fn_traits<R (*)(Args...) noexcept>
 };
 
 template<typename F, typename ArgsTuple, size_t... Is>
-void InvokeTypedHandler(F& fn, const std::string& source, const EventArgs& args, std::index_sequence<Is...>)
+void InvokeTypedHandler(F& fn, const std::string& event, const std::string& source, const EventArgs& args, std::index_sequence<Is...>)
 {
-        fn(source, args.get<std::decay_t<std::tuple_element_t<Is + 1, ArgsTuple>>>(Is)...);
+        std::tuple<std::decay_t<std::tuple_element_t<Is + 1, ArgsTuple>>...> values;
+        ArgError error;
+        if (!(decodeArg<std::decay_t<std::tuple_element_t<Is + 1, ArgsTuple>>, Is>(args, std::get<Is>(values), error) && ...))
+        {
+                fxw_internal::traceMessage("event '" + event + "' argument " + std::to_string(error.index + 1) + ": " + error.reason + ", handler skipped\n");
+                return;
+        }
+        fn(source, std::move(std::get<Is>(values))...);
 }
 
 template<typename F>
-EventHandler WrapTypedHandler(F&& fn)
+EventHandler WrapTypedHandler(const std::string& event, F&& fn)
 {
         using args_tuple = typename fn_traits<std::decay_t<F>>::tuple_type;
         constexpr size_t n = std::tuple_size_v<args_tuple>;
         static_assert(n >= 1, "Handler must accept at least source parameter");
-        return [f = std::forward<F>(fn)](const std::string& source, const EventArgs& args) mutable
+        return [event, f = std::forward<F>(fn)](const std::string& source, const EventArgs& args) mutable
         {
-                InvokeTypedHandler<decltype(f), args_tuple>(f, source, args, std::make_index_sequence<n - 1>{ });
+                InvokeTypedHandler<decltype(f), args_tuple>(f, event, source, args, std::make_index_sequence<n - 1>{ });
         };
 }
 
@@ -2326,7 +2329,7 @@ inline int32_t on(const std::string& event, F&& handler)
         if constexpr (std::is_convertible_v<std::decay_t<F>, EventHandler>)
                 h = EventHandler(std::forward<F>(handler));
         else
-                h = detail::WrapTypedHandler(std::forward<F>(handler));
+                h = detail::WrapTypedHandler(event, std::forward<F>(handler));
         if (auto* c = fxw_internal::currentContext())
         {
                 auto evIt = c->events.find(event);
@@ -2877,7 +2880,7 @@ inline void callExportAsync(const std::string& resource, const std::string& name
         callback(std::move(result));
 }
 
-inline void onCommand(const std::string& command, CommandHandler h)
+inline void onCommand(const std::string& command, CommandHandler h, bool restricted = false)
 {
         if (auto* c = fxw_internal::currentContext())
         {
@@ -2910,7 +2913,7 @@ inline void onCommand(const std::string& command, CommandHandler h)
         });
         if (cbRef.empty())
                 return;
-        invokeNative(HashString("REGISTER_COMMAND"), { NativeArg::ptr(command.c_str()), NativeArg::ptr(cbRef.c_str()), NativeArg(0) });
+        invokeNative(HashString("REGISTER_COMMAND"), { NativeArg::ptr(command.c_str()), NativeArg::ptr(cbRef.c_str()), NativeArg(restricted) });
 }
 
 }
