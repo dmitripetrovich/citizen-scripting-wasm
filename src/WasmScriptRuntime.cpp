@@ -2954,8 +2954,19 @@ static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, 
         return ok;
 }
 
+static void removeBuildOutputs(const std::string& wasmFile)
+{
+        for (const char* suffix : { "", ".d", ".d.tmp", ".sdk", ".vfs.yaml", ".strip" })
+        {
+                std::string path = wasmFile + suffix;
+                if (unlink(path.c_str()) != 0 && errno != ENOENT)
+                        LogWarning("Could not remove old build output '%s': %s", path.c_str(), strerror(errno));
+        }
+}
+
 static bool compileResource(const std::string& sourcePath, const std::string& wasmFile, const std::string& sdkPath, const std::string& resourceName, const std::string& root, bool rust)
 {
+        removeBuildOutputs(wasmFile);
         bool ok = rust ? compileRust(sourcePath, wasmFile, sdkPath, resourceName, root) : compileCpp(sourcePath, wasmFile, sdkPath, resourceName, root);
         if (ok)
                 writeBuildStamp(wasmFile, rust);
