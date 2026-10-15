@@ -953,48 +953,56 @@ static wasm_trap_t* CbGetInstanceId(void* env, wasmtime_caller_t*, const wasmtim
         return nullptr;
 }
 
-static bool HasWasmPermission(IScriptHost* host, const char* convarName, const std::string& resourceName)
+struct WasmPermission
 {
-        struct CacheEntry
+        std::unordered_set<std::string> allowed;
+        bool wildcard = false;
+};
+
+static WasmPermission g_childProcessPermission;
+static WasmPermission g_workerThreadsPermission;
+static std::once_flag g_permissionsOnce;
+
+static WasmPermission ParseWasmPermission(const std::string& value)
+{
+        WasmPermission permission;
+        size_t pos = 0;
+        while (pos < value.size())
         {
-                std::string raw;
-                std::unordered_set<std::string> allowed;
-                bool wildcard = false;
-        };
-        static std::mutex s_mu;
-        static std::unordered_map<std::string, CacheEntry> s_cache;
-        std::string current = GetConvar(host, convarName, "");
-        std::lock_guard<std::mutex> lk(s_mu);
-        auto& entry = s_cache[convarName];
-        if (entry.raw != current)
-        {
-                entry.raw = current;
-                entry.allowed.clear();
-                entry.wildcard = false;
-                size_t pos = 0;
-                while (pos < current.size())
+                size_t end = value.find(',', pos);
+                if (end == std::string::npos)
+                        end = value.size();
+                size_t start = pos;
+                while (start < end && value[start] == ' ')
+                        ++start;
+                size_t last = end;
+                while (last > start && value[last - 1] == ' ')
+                        --last;
+                if (last > start)
                 {
-                        size_t end = current.find(',', pos);
-                        if (end == std::string::npos)
-                                end = current.size();
-                        size_t start = pos;
-                        while (start < end && current[start] == ' ')
-                                ++start;
-                        size_t last = end;
-                        while (last > start && current[last - 1] == ' ')
-                                --last;
-                        if (last > start)
-                        {
-                                std::string token(current.data() + start, last - start);
-                                if (token == "*")
-                                        entry.wildcard = true;
-                                else
-                                        entry.allowed.insert(std::move(token));
-                        }
-                        pos = end + 1;
+                        std::string token(value.data() + start, last - start);
+                        if (token == "*")
+                                permission.wildcard = true;
+                        else
+                                permission.allowed.insert(std::move(token));
                 }
+                pos = end + 1;
         }
-        return entry.wildcard || entry.allowed.count(resourceName) > 0;
+        return permission;
+}
+
+static void LoadWasmPermissions(IScriptHost* host)
+{
+        std::call_once(g_permissionsOnce, [host]
+        {
+                g_childProcessPermission = ParseWasmPermission(GetConvar(host, "sv_wasmChildProcess", ""));
+                g_workerThreadsPermission = ParseWasmPermission(GetConvar(host, "sv_wasmWorkerThreads", ""));
+        });
+}
+
+static bool HasWasmPermission(const WasmPermission& permission, const std::string& resourceName)
+{
+        return permission.wildcard || permission.allowed.count(resourceName) > 0;
 }
 
 static wasm_trap_t* CbSpawnProcess(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t* results, size_t)
@@ -1013,9 +1021,9 @@ static wasm_trap_t* CbSpawnProcess(void* env, wasmtime_caller_t* caller, const w
                 results[0] = I32Val(-2);
                 return nullptr;
         }
-        if (!rt->host() || !HasWasmPermission(rt->host(), "sv_wasmChildProcess", rt->resourceName()))
+        if (!HasWasmPermission(g_childProcessPermission, rt->resourceName()))
         {
-                LogError("Resource '%s' denied child_process permission. Add 'set sv_wasmChildProcess \"%s\"' to your server.cfg", rt->resourceName().c_str(), rt->resourceName().c_str());
+                LogError("Resource '%s' denied child_process permission. Add 'set sv_wasmChildProcess \"%s\"' to your server.cfg and restart the server", rt->resourceName().c_str(), rt->resourceName().c_str());
                 results[0] = I32Val(-1);
                 return nullptr;
         }
@@ -1350,9 +1358,9 @@ static wasm_trap_t* CbCreateWorker(void* env, wasmtime_caller_t* caller, const w
                 results[0] = I32Val(-2);
                 return nullptr;
         }
-        if (!rt->host() || !HasWasmPermission(rt->host(), "sv_wasmWorkerThreads", rt->resourceName()))
+        if (!HasWasmPermission(g_workerThreadsPermission, rt->resourceName()))
         {
-                LogError("Resource '%s' denied worker_threads permission. Add 'set sv_wasmWorkerThreads \"%s\"' to your server.cfg", rt->resourceName().c_str(), rt->resourceName().c_str());
+                LogError("Resource '%s' denied worker_threads permission. Add 'set sv_wasmWorkerThreads \"%s\"' to your server.cfg and restart the server", rt->resourceName().c_str(), rt->resourceName().c_str());
                 results[0] = I32Val(-1);
                 return nullptr;
         }
@@ -1485,6 +1493,7 @@ WasmScriptRuntime::~WasmScriptRuntime()
 result_t OM_DECL WasmScriptRuntime::Create(IScriptHost* host)
 {
         m_host = fx::OMPtr<IScriptHost>(host);
+        LoadWasmPermissions(host);
         fx::OMPtr<IScriptHostWithResourceData> md;
         if (FX_SUCCEEDED(m_host.As(&md)) && md.GetRef())
         {
