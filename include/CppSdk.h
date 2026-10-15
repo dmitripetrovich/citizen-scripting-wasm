@@ -513,6 +513,23 @@ struct Reader
                 return s;
         }
 
+        static std::string keyName(Value& key, uint32_t index)
+        {
+                if (key.kind == Value::Kind::String)
+                        return std::move(key.scalar);
+                if (key.kind == Value::Kind::Number && key.isIntegral)
+                        return std::to_string(key.intVal);
+                if (key.kind == Value::Kind::Number)
+                {
+                        char buf[32];
+                        auto res = std::to_chars(buf, buf + sizeof(buf), key.numVal);
+                        return std::string(buf, res.ptr);
+                }
+                if (key.kind == Value::Kind::Bool)
+                        return key.boolVal ? "true" : "false";
+                return std::to_string(index);
+        }
+
         Value readMap(uint32_t n, int d)
         {
                 if (n > MAX_CONTAINER_ELEMENTS)
@@ -533,7 +550,7 @@ struct Reader
                         }
                         Value v;
                         v.kind = Value::Kind::Object;
-                        v.keys.push_back(key.kind == Value::Kind::String ? std::move(key.scalar) : std::string("0"));
+                        v.keys.push_back(keyName(key, 0));
                         v.children.push_back(std::move(val));
                         return v;
                 }
@@ -543,7 +560,7 @@ struct Reader
                 {
                         auto key = read(d + 1);
                         auto val = read(d + 1);
-                        v.keys.push_back(key.kind == Value::Kind::String ? std::move(key.scalar) : std::to_string(i));
+                        v.keys.push_back(keyName(key, i));
                         v.children.push_back(std::move(val));
                 }
                 return v;

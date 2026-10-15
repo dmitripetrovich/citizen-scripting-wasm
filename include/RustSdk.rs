@@ -343,6 +343,16 @@ impl<'a> MsgpackReader<'a> {
                 String::from_utf8_lossy(self.bytes(n)).into_owned()
         }
 
+        fn key_name(key: Value, index: u32) -> String {
+                match key {
+                        Value::String(s) => s,
+                        Value::Int(n) => n.to_string(),
+                        Value::Float(f) => f.to_string(),
+                        Value::Bool(b) => b.to_string(),
+                        _ => index.to_string(),
+                }
+        }
+
         fn read_map(&mut self, n: u32, depth: i32) -> Value {
                 if n > 65536 { self.error = true; return Value::Null; }
                 if n == 1 {
@@ -353,16 +363,14 @@ impl<'a> MsgpackReader<'a> {
                                         return Value::FuncRef(val.as_str().to_string());
                                 }
                         }
-                        let k = if let Value::String(s) = key { s } else { "0".to_string() };
-                        return Value::Object(vec![(k, val)]);
+                        return Value::Object(vec![(Self::key_name(key, 0), val)]);
                 }
                 let mut entries = Vec::new();
                 for i in 0..n {
                         if self.error { break; }
                         let key = self.read(depth + 1);
                         let val = self.read(depth + 1);
-                        let k = if let Value::String(s) = key { s } else { i.to_string() };
-                        entries.push((k, val));
+                        entries.push((Self::key_name(key, i), val));
                 }
                 Value::Object(entries)
         }
