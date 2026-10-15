@@ -484,15 +484,20 @@ static std::string TranslateNativeArgs(const WasmMem& mem, std::string_view kind
                         continue;
                 }
                 uint32_t off = static_cast<uint32_t>(value);
-                int64_t len = kinds[i] == 'b' && i + 1 < kinds.size() ? static_cast<int32_t>(wctx.args[i + 1]) : -1;
+                bool sized = kinds[i] == 'b' && i + 1 < kinds.size();
+                uint64_t len = 0;
+                if (sized)
+                        len = kinds[i + 1] == 'l' ? wctx.args[i + 1] : (wctx.args[i + 1] & 0xFFFFFFFFu);
+                if (sized && len > static_cast<uint64_t>(INT32_MAX))
+                        return "argument " + std::to_string(i + 1) + " is not a valid buffer length";
                 bool valid;
                 if (off == 0)
-                        valid = kinds[i] == 's' || (kinds[i] == 'b' && len <= 0);
+                        valid = kinds[i] == 's' || (kinds[i] == 'b' && len == 0);
                 else if (kinds[i] == 'p')
                         valid = mem.check(off, 8);
                 else if (kinds[i] == 'v')
                         valid = mem.check(off, 24);
-                else if (len >= 0)
+                else if (sized)
                         valid = mem.check(off, static_cast<size_t>(len));
                 else
                         valid = off < mem.sz && memchr(mem.base + off, 0, mem.sz - off) != nullptr;
