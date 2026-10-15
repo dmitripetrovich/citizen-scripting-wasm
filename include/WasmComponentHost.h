@@ -498,6 +498,11 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
         pfd.fd = pipefd[0];
         pfd.events = POLLIN;
         auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+        auto exited = [pid]
+        {
+                siginfo_t info{ };
+                return waitid(P_PID, static_cast<id_t>(pid), &info, WEXITED | WNOHANG | WNOWAIT) != 0 || info.si_pid == pid;
+        };
         while (true)
         {
                 auto now = std::chrono::steady_clock::now();
@@ -512,7 +517,7 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
                         continue;
                 if (ret <= 0)
                 {
-                        if (waitpid(pid, &wstatus, WNOHANG) != 0)
+                        if (exited())
                         {
                                 while (!(outputCapped && killOnOutputCap))
                                 {
@@ -549,31 +554,23 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
                 }
         }
         close(pipefd[0]);
-        pid_t wp = waitpid(pid, &wstatus, WNOHANG);
-        if (wp == 0 && !timedOut && !(outputCapped && killOnOutputCap))
+        bool done = exited();
+        if (!done && !timedOut && !(outputCapped && killOnOutputCap))
         {
-                while ((wp = waitpid(pid, &wstatus, WNOHANG)) == 0 && std::chrono::steady_clock::now() < deadline && !(cancel && cancel->load(std::memory_order_relaxed)))
+                while (!(done = exited()) && std::chrono::steady_clock::now() < deadline && !(cancel && cancel->load(std::memory_order_relaxed)))
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                if (wp == 0)
+                if (!done)
                         timedOut = true;
         }
-        if (wp == 0)
+        if (!done && !timedOut && outputCapped)
         {
-                if (timedOut)
-                        kill(-pid, SIGKILL);
-                else if (outputCapped)
-                {
-                        kill(-pid, SIGTERM);
-                        auto termDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
-                        pid_t wr;
-                        while ((wr = waitpid(pid, &wstatus, WNOHANG)) == 0 && std::chrono::steady_clock::now() < termDeadline)
-                                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                        if (wr == 0)
-                                kill(-pid, SIGKILL);
-                }
-                waitpid(pid, &wstatus, 0);
+                kill(-pid, SIGTERM);
+                auto termDeadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+                while (!exited() && std::chrono::steady_clock::now() < termDeadline)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         kill(-pid, SIGKILL);
+        waitpid(pid, &wstatus, 0);
         while (!result.output.empty() && result.output.back() == '\n')
                 result.output.pop_back();
         if (timedOut)
