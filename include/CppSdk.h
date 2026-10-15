@@ -1818,6 +1818,7 @@ struct TimerEntry
         int32_t id;
         std::chrono::steady_clock::time_point nextFire;
         uint32_t intervalMs;
+        bool repeat;
         std::function<void()> callback;
 };
 
@@ -1882,7 +1883,7 @@ struct Context
         std::vector<int32_t> dispatchExpired;
         std::vector<std::shared_ptr<cfx::TickHandler>> tickSnapshot;
 
-        int32_t addTimer(uint32_t ms, uint32_t intervalMs, std::function<void()> cb)
+        int32_t addTimer(uint32_t ms, bool repeat, std::function<void()> cb)
         {
                 if (timers.size() >= MAX_TIMERS)
                 {
@@ -1893,7 +1894,7 @@ struct Context
                 if (id < 0)
                         return -1;
                 auto fire = std::chrono::steady_clock::now() + std::chrono::milliseconds(ms);
-                timers[id] = { id, fire, intervalMs, std::move(cb) };
+                timers[id] = { id, fire, ms, repeat, std::move(cb) };
                 return id;
         }
 
@@ -1911,7 +1912,7 @@ struct Context
                                 continue;
                         char timerCtx[32];
                         snprintf(timerCtx, sizeof(timerCtx), "timer %d", id);
-                        if (it->second.intervalMs > 0)
+                        if (it->second.repeat)
                         {
                                 auto next = it->second.nextFire + std::chrono::milliseconds(it->second.intervalMs);
                                 it->second.nextFire = (next > now) ? next : now;
@@ -2965,13 +2966,13 @@ inline void performHttpRequest(const std::string& url, HttpCallback cb, const st
 inline int32_t setTimeout(uint32_t ms, std::function<void()> cb)
 {
         auto* c = fxw_internal::currentContext();
-        return c ? c->addTimer(ms, 0, std::move(cb)) : -1;
+        return c ? c->addTimer(ms, false, std::move(cb)) : -1;
 }
 
 inline int32_t setInterval(uint32_t ms, std::function<void()> cb)
 {
         auto* c = fxw_internal::currentContext();
-        return c ? c->addTimer(ms, ms, std::move(cb)) : -1;
+        return c ? c->addTimer(ms, true, std::move(cb)) : -1;
 }
 
 inline void clearTimer(int32_t id)

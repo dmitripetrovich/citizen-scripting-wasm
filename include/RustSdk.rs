@@ -532,6 +532,7 @@ struct TimerEntry {
         id: i32,
         next_fire: u64,
         interval_ms: u32,
+        repeat: bool,
         callback: Rc<dyn Fn()>,
 }
 
@@ -602,7 +603,7 @@ impl Context {
                 epoch.elapsed().as_millis() as u64
         }
 
-        fn add_timer(&mut self, ms: u32, interval_ms: u32, cb: Rc<dyn Fn()>) -> i32 {
+        fn add_timer(&mut self, ms: u32, repeat: bool, cb: Rc<dyn Fn()>) -> i32 {
                 if self.timers.len() >= 8192 {
                         trace_str("timer limit (8192) reached, dropping new timer\n");
                         return -1;
@@ -610,7 +611,7 @@ impl Context {
                 let id = allocate_id(&mut self.next_timer_id, &self.timers);
                 if id < 0 { return -1; }
                 let fire = self.now_ms() + ms as u64;
-                self.timers.insert(id, TimerEntry { id, next_fire: fire, interval_ms, callback: cb });
+                self.timers.insert(id, TimerEntry { id, next_fire: fire, interval_ms: ms, repeat, callback: cb });
                 id
         }
 }
@@ -874,11 +875,11 @@ pub fn remove_stop(id: i32) {
 }
 
 pub fn set_timeout(ms: u32, cb: impl Fn() + 'static) -> i32 {
-        unsafe { (*ctx()).add_timer(ms, 0, Rc::new(cb)) }
+        unsafe { (*ctx()).add_timer(ms, false, Rc::new(cb)) }
 }
 
 pub fn set_interval(ms: u32, cb: impl Fn() + 'static) -> i32 {
-        unsafe { (*ctx()).add_timer(ms, ms, Rc::new(cb)) }
+        unsafe { (*ctx()).add_timer(ms, true, Rc::new(cb)) }
 }
 
 pub fn clear_timer(id: i32) {
@@ -1916,7 +1917,7 @@ pub mod runtime {
                 for id in expired {
                         let c = ctx();
                         if let Some(timer) = unsafe { (*c).timers.get_mut(&id) } {
-                                if timer.interval_ms > 0 {
+                                if timer.repeat {
                                         let next = timer.next_fire + timer.interval_ms as u64;
                                         timer.next_fire = if next > now { next } else { now };
                                         let cb = Rc::clone(&timer.callback);
