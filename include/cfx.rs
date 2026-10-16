@@ -212,9 +212,9 @@ impl Value {
                 match self { Value::Object(entries) => entries.iter().any(|(k, _)| k == key), _ => false }
         }
         pub fn is_func_ref(&self) -> bool { matches!(self, Value::FuncRef(_)) }
-        pub fn call(&self, args: &[Value]) -> Value {
+        pub fn call(&self, args: impl IntoArgs) -> Value {
                 let r = match self { Value::FuncRef(r) => r, _ => return Value::Null };
-                let data = invoke_function_reference(r, &encode(&Value::Array(args.to_vec())));
+                let data = invoke_function_reference(r, &encode(&Value::Array(args.into_args())));
                 if data.is_empty() { return Value::Null; }
                 match decode(&data) {
                         Value::Array(values) => values.into_iter().next().unwrap_or(Value::Null),
@@ -243,6 +243,42 @@ impl From<bool> for Value { fn from(v: bool) -> Self { Value::Bool(v) } }
 impl From<&str> for Value { fn from(v: &str) -> Self { Value::String(v.to_string()) } }
 impl From<String> for Value { fn from(v: String) -> Self { Value::String(v) } }
 impl From<()> for Value { fn from(_: ()) -> Self { Value::Null } }
+
+pub trait IntoArgs {
+        fn into_args(self) -> Vec<Value>;
+}
+
+impl IntoArgs for () { fn into_args(self) -> Vec<Value> { Vec::new() } }
+impl IntoArgs for Vec<Value> { fn into_args(self) -> Vec<Value> { self } }
+impl IntoArgs for &Vec<Value> { fn into_args(self) -> Vec<Value> { self.clone() } }
+impl IntoArgs for &[Value] { fn into_args(self) -> Vec<Value> { self.to_vec() } }
+impl<const N: usize> IntoArgs for [Value; N] { fn into_args(self) -> Vec<Value> { self.into() } }
+impl<const N: usize> IntoArgs for &[Value; N] { fn into_args(self) -> Vec<Value> { self.to_vec() } }
+
+macro_rules! impl_single_into_args {
+        ($($t:ty),*) => { $(impl IntoArgs for $t { fn into_args(self) -> Vec<Value> { vec![self.into()] } })* };
+}
+impl_single_into_args!(Value, bool, i8, i16, i32, i64, u8, u16, u32, u64, isize, usize, f32, f64, String, &str);
+
+macro_rules! impl_tuple_into_args {
+        ($($t:ident $i:tt),+) => {
+                impl<$($t: Into<Value>),+> IntoArgs for ($($t,)+) {
+                        fn into_args(self) -> Vec<Value> { vec![$(self.$i.into()),+] }
+                }
+        };
+}
+impl_tuple_into_args!(A 0);
+impl_tuple_into_args!(A 0, B 1);
+impl_tuple_into_args!(A 0, B 1, C 2);
+impl_tuple_into_args!(A 0, B 1, C 2, D 3);
+impl_tuple_into_args!(A 0, B 1, C 2, D 3, E 4);
+impl_tuple_into_args!(A 0, B 1, C 2, D 3, E 4, F 5);
+impl_tuple_into_args!(A 0, B 1, C 2, D 3, E 4, F 5, G 6);
+impl_tuple_into_args!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7);
+impl_tuple_into_args!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8);
+impl_tuple_into_args!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9);
+impl_tuple_into_args!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9, K 10);
+impl_tuple_into_args!(A 0, B 1, C 2, D 3, E 4, F 5, G 6, H 7, I 8, J 9, K 10, L 11);
 pub struct MsgpackWriter {
         pub buf: Vec<u8>,
 }
@@ -953,23 +989,23 @@ pub fn remove_event_handler(token: i32) {
         }
 }
 
-pub fn emit(event: &str, args: &[Value]) -> bool {
-        let buf = encode_args(args);
+pub fn emit(event: &str, args: impl IntoArgs) -> bool {
+        let buf = encode_args(&args.into_args());
         unsafe {
                 __cfx_emit_event(event.as_ptr(), event.len() as u32, buf.as_ptr(), buf.len() as u32);
         }
         invoke_native_bool(hash_string(b"WAS_EVENT_CANCELED"), &[])
 }
 
-pub fn emit_net(event: &str, target: i32, args: &[Value]) {
-        let buf = encode_args(args);
+pub fn emit_net(event: &str, target: i32, args: impl IntoArgs) {
+        let buf = encode_args(&args.into_args());
         unsafe {
                 __cfx_emit_net_event(event.as_ptr(), event.len() as u32, target, buf.as_ptr(), buf.len() as u32);
         }
 }
 
-pub fn emit_latent(event: &str, target: i32, bps: i32, args: &[Value]) {
-        let buf = encode_args(args);
+pub fn emit_latent(event: &str, target: i32, bps: i32, args: impl IntoArgs) {
+        let buf = encode_args(&args.into_args());
         let event_cs = CString::new(event).unwrap_or_default();
         let target_cs = CString::new(target.to_string()).unwrap_or_default();
         invoke_native_void(hash_string(b"TRIGGER_LATENT_CLIENT_EVENT_INTERNAL"), &[NativeArg::ptr(event_cs.as_ptr() as u64), NativeArg::ptr(target_cs.as_ptr() as u64), NativeArg::ptr(buf.as_ptr() as u64), NativeArg::val(buf.len() as u32 as u64), NativeArg::val(bps as u32 as u64)]);
@@ -1150,7 +1186,9 @@ pub fn add_export<M>(name: &str, handler: impl IntoExportHandler<M>) {
         });
 }
 
-pub fn call_export(resource: &str, name: &str, args: &[Value]) -> Value {
+pub fn call_export(resource: &str, name: &str, args: impl IntoArgs) -> Value {
+        let args = args.into_args();
+        let args = args.as_slice();
         let cache_key = format!("{}/{}", resource, name);
         let c = ctx();
         let cached = unsafe { (*c).export_ref_cache.get(&cache_key).cloned() }.unwrap_or_default();
@@ -1205,10 +1243,10 @@ impl Future for ExportCall {
         }
 }
 
-pub fn call_export_async(resource: &str, name: &str, args: &[Value]) -> ExportCall {
+pub fn call_export_async(resource: &str, name: &str, args: impl IntoArgs) -> ExportCall {
         let result = Rc::new(std::cell::RefCell::new(None));
         let slot = result.clone();
-        start_export_call(resource, name, args, move |value| *slot.borrow_mut() = Some(value));
+        start_export_call(resource, name, &args.into_args(), move |value| *slot.borrow_mut() = Some(value));
         ExportCall { result }
 }
 

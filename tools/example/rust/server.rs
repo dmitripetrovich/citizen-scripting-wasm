@@ -81,8 +81,8 @@ Server! {
                         return;
                 }
                 let name = cfx::get_current_resource_name();
-                let info = cfx::call_export(&name, "getPlayerInfo", &[cfx::Value::from(source)]);
+                let info = cfx::call_export(&name, "getPlayerInfo", source);
                 println!("[cfx::add_export] {}", info.as_str());
-                cfx::call_export("fw", "SendChatMessage", &[cfx::Value::from(source), cfx::Value::from("^#f0a0e4[INFO] ^#ffffffHello from ^#b7410eRust^#ffffff!")]);
+                cfx::call_export("fw", "SendChatMessage", (source, "^#f0a0e4[INFO] ^#ffffffHello from ^#b7410eRust^#ffffff!"));
         }, false);
 }
