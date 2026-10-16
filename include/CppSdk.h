@@ -40,7 +40,22 @@ struct ProcessResult
 
         bool isRunning() const
         {
+                return status == -3;
+        }
+
+        bool isTimedOut() const
+        {
                 return status == -4;
+        }
+
+        bool isError() const
+        {
+                return status == -1;
+        }
+
+        bool isInvalid() const
+        {
+                return status == -2;
         }
 
         bool isDone() const

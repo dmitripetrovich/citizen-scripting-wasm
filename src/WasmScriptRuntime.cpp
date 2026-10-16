@@ -1035,13 +1035,13 @@ static wasm_trap_t* CbSpawnProcess(void* env, wasmtime_caller_t* caller, const w
         if (rt->m_processes.size() >= static_cast<size_t>(WasmScriptRuntime::MAX_PROCESSES_PER_RESOURCE))
         {
                 LogError("Resource '%s' exceeded max child process limit (%d)", rt->resourceName().c_str(), WasmScriptRuntime::MAX_PROCESSES_PER_RESOURCE);
-                results[0] = I32Val(-2);
+                results[0] = I32Val(-3);
                 return nullptr;
         }
         int32_t processId = fx::allocateId(rt->m_nextProcessId, rt->m_processes);
         if (processId < 0)
         {
-                results[0] = I32Val(-2);
+                results[0] = I32Val(-3);
                 return nullptr;
         }
         std::string cmd = mem.readStr(cmdPtr, cmdLen);
@@ -1061,7 +1061,7 @@ static wasm_trap_t* CbSpawnProcess(void* env, wasmtime_caller_t* caller, const w
         }
         catch (...)
         {
-                results[0] = I32Val(-2);
+                results[0] = I32Val(-3);
                 return nullptr;
         }
         rt->m_processes[processId] = std::move(state);
@@ -1084,7 +1084,7 @@ static wasm_trap_t* CbPollProcess(void* env, wasmtime_caller_t* caller, const wa
         std::lock_guard<std::mutex> lk(state->mutex);
         if (!state->done)
         {
-                results[0] = I32Val(-4);
+                results[0] = I32Val(-3);
                 return nullptr;
         }
         WasmMem mem;
@@ -2493,7 +2493,7 @@ static bool depsChanged(const std::string& wasmPath)
 
 static bool processFailed(const fx::ProcessResult& result, std::string& reason)
 {
-        if (result.status == -3)
+        if (result.status == -4)
                 reason = "timed out";
         else if (result.status < 0)
                 reason = "could not be started";

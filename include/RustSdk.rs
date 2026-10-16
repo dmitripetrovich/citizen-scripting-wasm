@@ -1292,7 +1292,10 @@ pub struct ProcessResult {
 }
 
 impl ProcessResult {
-        pub fn is_running(&self) -> bool { self.status == -4 }
+        pub fn is_running(&self) -> bool { self.status == -3 }
+        pub fn is_timed_out(&self) -> bool { self.status == -4 }
+        pub fn is_error(&self) -> bool { self.status == -1 }
+        pub fn is_invalid(&self) -> bool { self.status == -2 }
         pub fn is_done(&self) -> bool { self.status >= 0 }
 }
 

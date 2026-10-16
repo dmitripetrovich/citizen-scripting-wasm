@@ -454,7 +454,7 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
         int pipefd[2];
         if (pipe2(pipefd, O_CLOEXEC) < 0)
         {
-                result.status = -2;
+                result.status = -1;
                 return result;
         }
         const auto& envStrs = cachedFilteredEnv();
@@ -482,7 +482,7 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
         {
                 close(pipefd[0]);
                 close(pipefd[1]);
-                result.status = -2;
+                result.status = -1;
                 result.output = std::string("failed to run '") + path + "': " + strerror(spawnErr);
                 return result;
         }
@@ -575,7 +575,7 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
                 result.output.pop_back();
         if (timedOut)
         {
-                result.status = -3;
+                result.status = -4;
                 return result;
         }
         result.ok = true;
@@ -601,7 +601,7 @@ inline ProcessResult spawnProgram(const std::vector<std::string>& args, size_t m
         if (args.empty())
         {
                 ProcessResult result{ };
-                result.status = -2;
+                result.status = -1;
                 return result;
         }
         std::vector<const char*> argv;
