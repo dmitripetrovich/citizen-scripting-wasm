@@ -27,7 +27,7 @@ project "citizen-scripting-wasm"
         makesettings [[
                 .DEFAULT_GOAL := all
                 SDK_SOURCES = ../include/cfx.h ../include/cfx.rs ../src/natives/all.h ../src/natives/all.rs
-                ../src/sdk.blob: $(SDK_SOURCES) ; @echo Embedding SDK && python3 ../tools/native_db.py --embed-only --embed $@
+                ../src/sdk.blob: $(SDK_SOURCES) ../tools/native_db.py ; @echo Embedding SDK && python3 ../tools/native_db.py --embed-only --embed $@
                 obj/Debug/WasmScriptRuntime.o obj/Release/WasmScriptRuntime.o: ../src/sdk.blob
         ]]
         postbuildcommands {
