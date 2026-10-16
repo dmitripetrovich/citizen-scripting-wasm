@@ -1674,6 +1674,8 @@ bool WasmModule::call(const wasmtime_func_t& fn, const wasmtime_val_t* args, siz
                 limitExceeded = true;
         rt->m_activeModule = prev;
         --callDepth;
+        if (!ok && !nested)
+                FlushModuleStdio(*this, true);
         return ok;
 }
 

@@ -3268,10 +3268,8 @@ inline void resumeCoroutineById(int32_t id)
 #if __cpp_exceptions
         handle.promise().exception = nullptr;
 #endif
+        auto running = coros.extract(it);
         handle.resume();
-        it = coros.find(id);
-        if (it == coros.end())
-                return;
         if (handle.done())
         {
 #if __cpp_exceptions
@@ -3282,10 +3280,10 @@ inline void resumeCoroutineById(int32_t id)
                 }
 #endif
                 handle.destroy();
-                coros.erase(it);
+                return;
         }
-        else
-                scheduleCoroutine(id, it->second, handle.promise().waitMs);
+        scheduleCoroutine(id, running.mapped(), handle.promise().waitMs);
+        coros.insert(std::move(running));
 }
 
 inline void resumeCoroutineIfDue(int32_t id)
