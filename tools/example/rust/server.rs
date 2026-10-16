@@ -1,4 +1,4 @@
-use cfx::Server;
+use cfx::*;
 use std::cell::Cell;
 use std::collections::HashMap;
 

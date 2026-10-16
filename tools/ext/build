@@ -18,13 +18,13 @@ read_flags() {
 case "$SRC" in
         *.cpp)
                 read_flags g_cppFlags
-                zig c++ "${FLAGS[@]}" -I"$SDK_DIR" "$SRC" "$@" -o "$OUT"
+                zig c++ "${FLAGS[@]}" -I"$SDK_DIR" -I"$SDK_DIR/include" -include "$SDK_DIR/include/cfx.h" "$SRC" "$@" -o "$OUT"
                 python3 "$SDK_DIR/tools/ext/debug" "$OUT"
                 ;;
         *.rs)
                 [[ $# -eq 0 ]] || { echo "Error: Rust helpers are pulled in with mod, pass only the script" >&2; exit 2; }
                 RLIB="$SDK_DIR/build/libcfx.rlib"
-                RLIB_SRC="$SDK_DIR/include/RustSdk.rs"
+                RLIB_SRC="$SDK_DIR/include/cfx.rs"
                 RLIB_NATIVES="$SDK_DIR/src/natives/all.rs"
                 read_flags g_rlibFlags
                 RLIB_KEY="$(rustc -V) ${FLAGS[*]}"

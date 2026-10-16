@@ -227,6 +227,7 @@ struct MsgpackWriter
 #ifdef __wasm__
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <charconv>
 #include <cstdlib>
@@ -236,12 +237,15 @@ struct MsgpackWriter
 #include <cmath>
 #include <coroutine>
 #include <limits>
+#include <map>
 #include <memory>
 #include <optional>
+#include <print>
 #include <tuple>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 #include <functional>
 
@@ -3687,6 +3691,8 @@ void __cfx_init()
         });
         cfx_main();
 }
+
+#include "../src/natives/all.h"
 
 #define Server void cfx_main()
 

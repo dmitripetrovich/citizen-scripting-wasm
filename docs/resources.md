@@ -9,8 +9,7 @@ See [tools/example](../tools/example) for a C++/Rust resource using events, net 
 An entry file runs on its own and has one entry block:
 
 ```cpp
-#include <include/CppSdk.h>
-#include <print>
+#include <cfx.h>
 
 Server
 {
@@ -19,12 +18,16 @@ Server
 ```
 
 ```rust
-use cfx::Server;
+use cfx::*;
 
 Server! {
     println!("hello from Rust");
 }
 ```
+
+`#include <cfx.h>` and `use cfx::*;` bring in the whole SDK and every native, C++ also gets the common standard headers such as `<print>`, `<string>`, `<vector>` and `<unordered_map>`.
+
+Anything else still needs its own include or `use`, just like any other C++ or Rust program, for example `#include <regex>` or `use std::collections::HashMap;`.
 
 Reference it in your manifest:
 
@@ -95,7 +98,7 @@ std::string greet();
 `util.cpp` is the helper, no entry block:
 
 ```cpp
-#include <include/CppSdk.h>
+#include <cfx.h>
 #include "util.h"
 
 std::string greet()
@@ -107,8 +110,7 @@ std::string greet()
 `main.cpp` is the entry file that uses it:
 
 ```cpp
-#include <include/CppSdk.h>
-#include <print>
+#include <cfx.h>
 #include "util.h"
 
 Server
@@ -132,7 +134,7 @@ pub fn start() {
 `jobs.rs` is the entry file that uses it:
 
 ```rust
-use cfx::Server;
+use cfx::*;
 mod payroll;
 
 Server! {

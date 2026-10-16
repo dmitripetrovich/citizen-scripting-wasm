@@ -2567,7 +2567,7 @@ static std::string ensureRustRlib(const std::string& sdkPath)
         }
         std::string dir = sdkPath + "/rust-" + hashWithFlags(rustcHash, { &g_rlibFlags });
         std::string rlib = dir + "/libcfx.rlib";
-        std::string src = sdkPath + "/include/RustSdk.rs";
+        std::string src = sdkPath + "/include/cfx.rs";
         if (fileExists(rlib) && !isNewer(src, rlib))
                 return rlib;
         mkdir(dir.c_str(), 0700);
@@ -2841,7 +2841,7 @@ static bool scanCppDeps(const std::string& cppPath, const std::string& depFile, 
 {
         std::vector<std::string> args{ "zig", "c++" };
         args.insert(args.end(), g_cppFlags.begin(), g_cppFlags.end());
-        args.insert(args.end(), { "-ivfsoverlay", overlay, "-I" + sdkPath, "-MM", "-MF", depFile, cppPath });
+        args.insert(args.end(), { "-ivfsoverlay", overlay, "-I" + sdkPath, "-I" + sdkPath + "/include", "-MM", "-MF", depFile, cppPath });
         auto result = fx::spawnProgram(args, 1048576, 60000);
         std::string reason;
         if (processFailed(result, reason))
@@ -2914,6 +2914,53 @@ static bool StripDebugSections(const std::string& wasmPath)
         return true;
 }
 
+static const std::string& getZigHash()
+{
+        static std::string s_hash;
+        static std::chrono::steady_clock::time_point s_nextAttempt{ };
+        auto now = std::chrono::steady_clock::now();
+        if (s_hash.empty() && now >= s_nextAttempt)
+        {
+                s_nextAttempt = now + std::chrono::seconds(30);
+                auto result = fx::spawnProgram({ "zig", "version" }, 65536, 10000);
+                std::string reason;
+                if (!processFailed(result, reason))
+                        s_hash = fnv1aHex(reinterpret_cast<const unsigned char*>(result.output.data()), reinterpret_cast<const unsigned char*>(result.output.data() + result.output.size()));
+        }
+        return s_hash;
+}
+
+static std::string ensureCppPch(const std::string& sdkPath)
+{
+        static std::mutex s_mutex;
+        static std::unordered_set<std::string> s_failed;
+        std::lock_guard<std::mutex> lk(s_mutex);
+        const std::string& zigHash = getZigHash();
+        if (zigHash.empty())
+                return { };
+        std::string dir = sdkPath + "/cpp-" + hashWithFlags(zigHash, { &g_cppFlags });
+        std::string pch = dir + "/cfx.pch";
+        if (fileExists(pch))
+                return pch;
+        if (s_failed.count(dir))
+                return { };
+        mkdir(dir.c_str(), 0700);
+        std::string tmp = pch + ".tmp-" + std::to_string(getpid());
+        std::vector<std::string> args{ "zig", "c++" };
+        args.insert(args.end(), g_cppFlags.begin(), g_cppFlags.end());
+        args.insert(args.end(), { "-Wno-unused-command-line-argument", "-x", "c++-header", "-I" + sdkPath, sdkPath + "/include/cfx.h", "-o", tmp });
+        auto result = fx::spawnProgram(args, 1048576, 300000);
+        std::string reason;
+        if (processFailed(result, reason) || rename(tmp.c_str(), pch.c_str()) != 0)
+        {
+                unlink(tmp.c_str());
+                s_failed.insert(dir);
+                LogWarning("Failed to precompile <cfx.h>, C++ resources compile without it (%s):\n%s", reason.c_str(), result.output.c_str());
+                return { };
+        }
+        return pch;
+}
+
 static bool compileCppSources(const std::string& cppPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& overlay, const std::string& resourceName, const std::string& root)
 {
         std::vector<std::string> sources{ cppPath };
@@ -2941,9 +2988,14 @@ static bool compileCppSources(const std::string& cppPath, const std::string& was
                         sources.push_back(helper);
                 }
         }
+        std::string pch = ensureCppPch(sdkPath);
         std::vector<std::string> args{ "zig", "c++" };
         args.insert(args.end(), g_cppFlags.begin(), g_cppFlags.end());
-        args.insert(args.end(), { "-ivfsoverlay", overlay, "-I" + sdkPath });
+        args.insert(args.end(), { "-ivfsoverlay", overlay, "-I" + sdkPath, "-I" + sdkPath + "/include" });
+        if (pch.empty())
+                args.insert(args.end(), { "-include", sdkPath + "/include/cfx.h" });
+        else
+                args.insert(args.end(), { "-include-pch", pch });
         args.insert(args.end(), sources.begin(), sources.end());
         args.push_back("-o");
         args.push_back(wasmPath);

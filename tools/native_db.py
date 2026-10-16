@@ -436,16 +436,12 @@ def generate_type_table(natives: list[dict]) -> tuple[str, int]:
 
 
 def embed_sdk(base_dir, output):
-        files = [
-                "include/CppSdk.h",
-                "include/RustSdk.rs",
-                "src/natives/all.h",
-                "src/natives/all.rs",
-        ]
-        blob = struct.pack("<I", len(files))
-        for rel_path in files:
+        files = {}
+        for rel_path in ("include/cfx.h", "include/cfx.rs", "src/natives/all.h", "src/natives/all.rs"):
                 with open(os.path.join(base_dir, rel_path), "rb") as f:
-                        data = f.read()
+                        files[rel_path] = f.read()
+        blob = struct.pack("<I", len(files))
+        for rel_path, data in files.items():
                 path_bytes = rel_path.encode("utf-8")
                 blob += struct.pack("<I", len(path_bytes)) + path_bytes
                 blob += struct.pack("<I", len(data)) + data

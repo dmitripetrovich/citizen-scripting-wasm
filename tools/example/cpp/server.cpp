@@ -1,10 +1,4 @@
-#include <include/CppSdk.h>
-#include <src/natives/all.h>
-#include <algorithm>
-#include <cstdlib>
-#include <cstring>
-#include <print>
-#include <unordered_map>
+#include <cfx.h>
 
 static std::unordered_map<int, std::string> pending;
 static std::unordered_map<int, std::string> players;
@@ -48,7 +42,7 @@ Server
                 if (it != pending.end())
                         pending.erase(it);
                 players[source] = name;
-                // typed wrapper from src/natives/all.h
+                // typed wrapper from cfx::natives
                 std::string license = cfx::natives::GetPlayerIdentifierByType(source, "license2");
                 std::println("{} [{}] ({}) has connected. Players Online: {}", name, license, source, players.size());
         });
@@ -74,7 +68,7 @@ Server
         cfx::addExport("getPlayerInfo", [](int source)
         {
                 std::string src = std::to_string(source);
-                // string-based alternative (works without native includes)
+                // string-based alternative
                 std::string name = cfx::native<std::string>("GET_PLAYER_NAME", src.c_str());
                 int ping = cfx::native<int>("GET_PLAYER_PING", src.c_str());
                 return name + " (ping=" + std::to_string(ping) + "ms)";
