@@ -204,7 +204,7 @@ def generate_wrapper(native: dict) -> str | None:
         return f"{wrapper}\n\n        inline {cpp_ret} {func_name}({int_params})\n        {{\n                {ret}{func_name}({forward_args});\n        }}"
 
 
-def generate_namespace_block(namespace: str, natives: list[dict]) -> tuple[str, str, int] | None:
+def generate_cpp_wrappers(natives: list[dict]) -> list[tuple[str, str]]:
         seen: dict[tuple, dict] = {}
         for n in natives:
                 name = n.get("name")
@@ -218,13 +218,8 @@ def generate_namespace_block(namespace: str, natives: list[dict]) -> tuple[str, 
         for n in sorted(seen.values(), key=lambda x: x.get("name", "")):
                 w = generate_wrapper(n)
                 if w:
-                        wrappers.append(w)
-        if not wrappers:
-                return None
-        body = "\n\n".join(wrappers)
-        ns_lower = namespace.lower()
-        block = f"namespace {ns_lower}\n{{\n\n{body}\n\n}} // namespace {ns_lower}"
-        return ns_lower, block, len(wrappers)
+                        wrappers.append((screaming_to_pascal(n["name"]), w))
+        return wrappers
 
 
 def fetch_json(url: str, no_cache: bool = False):
@@ -351,7 +346,7 @@ def generate_rust_wrapper(native: dict) -> str | None:
         return f"        {sig} {{\n{cstring_block}                {body}\n        }}"
 
 
-def generate_rust_namespace_block(namespace: str, natives: list[dict]) -> tuple[str, str, int] | None:
+def generate_rust_wrappers(natives: list[dict]) -> list[tuple[str, str]]:
         by_name: dict[str, dict] = {}
         for n in natives:
                 name = n.get("name")
@@ -364,12 +359,8 @@ def generate_rust_namespace_block(namespace: str, natives: list[dict]) -> tuple[
         for n in sorted(by_name.values(), key=lambda x: x.get("name", "")):
                 w = generate_rust_wrapper(n)
                 if w:
-                        wrappers.append(w)
-        if not wrappers:
-                return None
-        body = "\n\n".join(wrappers)
-        ns_lower = namespace.lower()
-        return ns_lower, body, len(wrappers)
+                        wrappers.append((screaming_to_snake(n["name"]), w))
+        return wrappers
 
 
 SCALAR_KINDS = {
@@ -514,48 +505,39 @@ def main():
         for ns in all_ns:
                 all_ns[ns] = [n for n in all_ns[ns]
                                 if not n.get("name") or global_seen.get((n["name"], param_sig(n)), (None,))[0] == ns]
-        cpp_blocks = []
-        total_count = 0
-        rust_modules = []
-        rust_total = 0
-        ns_count = 0
-        for ns in sorted(all_ns.keys()):
+        cpp_owner: dict[str, str] = {}
+        cpp_wrappers: list[tuple[str, str]] = []
+        rust_owner: dict[str, str] = {}
+        rust_wrappers: list[tuple[str, str]] = []
+        for ns in sorted(all_ns.keys(), key=lambda n: (n.lower() != "cfx", n)):
                 natives = all_ns[ns]
-                result = generate_namespace_block(ns, natives)
-                if result:
-                        ns_lower, block, count = result
-                        total_count += count
-                        cpp_blocks.append(block)
-                        ns_count += 1
-                        print(f"  {ns}: {count} C++ wrappers")
-                rust_result = generate_rust_namespace_block(ns, natives)
-                if rust_result:
-                        rs_lower, rs_body, rs_count = rust_result
-                        rust_total += rs_count
-                        rust_modules.append((rs_lower.replace(" ", "_"), rs_body))
-                        print(f"  {ns}: {rs_count} Rust wrappers")
+                for name, wrapper in generate_cpp_wrappers(natives):
+                        if cpp_owner.setdefault(name, ns) == ns:
+                                cpp_wrappers.append((name, wrapper))
+                for name, wrapper in generate_rust_wrappers(natives):
+                        if rust_owner.setdefault(name, ns) == ns:
+                                rust_wrappers.append((name, wrapper))
 
         for f in os.listdir(output_dir):
                 if f.endswith(".h") and f not in ("all.h", "types.h"):
                         os.remove(os.path.join(output_dir, f))
 
         all_h = "// Auto-generated, do not edit.\n#pragma once\n\nnamespace cfx::natives\n{\n\n"
-        all_h += "\n\n".join(cpp_blocks)
+        all_h += "\n\n".join(w for _, w in sorted(cpp_wrappers, key=lambda x: x[0]))
         all_h += "\n\n} // namespace cfx::natives\n"
         with open(os.path.join(output_dir, "all.h"), "w") as f:
                 f.write(all_h)
 
-        rust_lines = ["// Auto-generated, do not edit.\n"]
-        for mod_name, mod_body in rust_modules:
-                rust_lines.append(f"pub mod {mod_name} {{\n{mod_body}\n}}\n")
+        all_rs = "// Auto-generated, do not edit.\n\n"
+        all_rs += "\n\n".join(w for _, w in sorted(rust_wrappers, key=lambda x: x[0]))
         with open(os.path.join(output_dir, "all.rs"), "w") as f:
-                f.write("\n".join(rust_lines))
+                f.write(all_rs + "\n")
 
         types_h, types_count = generate_type_table(cfx_natives)
         with open(os.path.join(output_dir, "types.h"), "w") as f:
                 f.write(types_h)
 
-        print(f"\nGenerated {total_count} C++ wrappers, {rust_total} Rust wrappers across {ns_count} namespaces, {types_count} native types")
+        print(f"\nGenerated {len(cpp_wrappers)} C++ wrappers, {len(rust_wrappers)} Rust wrappers, {types_count} native types")
         print(f"Output: {output_dir}/")
 
         embed_sdk(base_dir, args.embed)

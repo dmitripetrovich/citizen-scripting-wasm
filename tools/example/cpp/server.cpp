@@ -48,14 +48,14 @@ Server
                         pending->erase(it);
                 (*players)[source] = name;
                 // typed wrapper from src/natives/all.h
-                std::string license = cfx::natives::cfx::GetPlayerIdentifierByType(source, "license2");
+                std::string license = cfx::natives::GetPlayerIdentifierByType(source, "license2");
                 cfx::trace("%s [%s] (%d) has connected. Players Online: %zu\n", name.c_str(), license.c_str(), source, players->size());
         });
 
         cfx::on("playerDropped", [players](int source, std::string reason)
         {
                 std::string name = players->count(source) ? (*players)[source] : "Unknown";
-                std::string license = cfx::natives::cfx::GetPlayerIdentifierByType(source, "license2");
+                std::string license = cfx::natives::GetPlayerIdentifierByType(source, "license2");
                 players->erase(source);
                 cfx::trace("%s [%s] (%d) has disconnected (%s). Players Online: %zu\n", name.c_str(), license.c_str(), source, reason.c_str(), players->size());
         });

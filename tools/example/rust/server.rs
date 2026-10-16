@@ -35,7 +35,7 @@ Server! {
         cfx::on("playerJoining", move |source: i32, old_id: String| {
                 let name = old_id.parse().ok().and_then(|id| pending_joining.borrow_mut().remove(&id)).unwrap_or_else(|| "Unknown".to_string());
                 players_joining.borrow_mut().insert(source, name.clone());
-                let license = cfx::natives::cfx::get_player_identifier_by_type(source, "license2");
+                let license = cfx::natives::get_player_identifier_by_type(source, "license2");
                 let count = players_joining.borrow().len();
                 cfx::trace!("{} [{}] ({}) has connected. Players Online: {}\n", name, license, source, count);
         });
@@ -43,7 +43,7 @@ Server! {
         let players_dropped = players.clone();
         cfx::on("playerDropped", move |source: i32, reason: String| {
                 let name = players_dropped.borrow().get(&source).cloned().unwrap_or_else(|| "Unknown".to_string());
-                let license = cfx::natives::cfx::get_player_identifier_by_type(source, "license2");
+                let license = cfx::natives::get_player_identifier_by_type(source, "license2");
                 players_dropped.borrow_mut().remove(&source);
                 let count = players_dropped.borrow().len();
                 cfx::trace!("{} [{}] ({}) has disconnected ({}). Players Online: {}\n", name, license, source, reason, count);
