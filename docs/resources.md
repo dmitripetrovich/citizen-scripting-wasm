@@ -10,10 +10,11 @@ An entry file runs on its own and has one entry block:
 
 ```cpp
 #include <include/CppSdk.h>
+#include <print>
 
 Server
 {
-    cfx::trace("hello from C++\n");
+    std::println("hello from C++");
 }
 ```
 
@@ -21,7 +22,7 @@ Server
 use cfx::Server;
 
 Server! {
-    cfx::trace!("hello from Rust\n");
+    println!("hello from Rust");
 }
 ```
 
@@ -107,11 +108,12 @@ std::string greet()
 
 ```cpp
 #include <include/CppSdk.h>
+#include <print>
 #include "util.h"
 
 Server
 {
-    cfx::trace("%s\n", greet().c_str());
+    std::println("{}", greet());
 }
 ```
 
@@ -122,7 +124,7 @@ Rust uses a helper through `mod`. `payroll.rs` is compiled into `jobs.rs` becaus
 ```rust
 pub fn start() {
     cfx::set_interval(60000, || {
-        cfx::trace!("paying everyone\n");
+        println!("paying everyone");
     });
 }
 ```

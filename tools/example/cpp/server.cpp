@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <print>
 #include <unordered_map>
 
 CFX_WORKER(countPrimes)
@@ -25,14 +26,14 @@ CFX_WORKER(countPrimes)
 
 Server
 {
-        cfx::trace("Instantiated instance of script %s.\n", cfx::getCurrentResourceName().c_str());
+        std::println("Instantiated instance of script {}.", cfx::getCurrentResourceName());
 
         auto pending = std::make_shared<std::unordered_map<int, std::string>>();
         auto players = std::make_shared<std::unordered_map<int, std::string>>();
 
         cfx::onStop([players]()
         {
-                cfx::trace("Resource stopping, %zu players tracked.\n", players->size());
+                std::println("Resource stopping, {} players tracked.", players->size());
         });
 
         cfx::on("playerConnecting", [pending](int source, std::string name)
@@ -49,7 +50,7 @@ Server
                 (*players)[source] = name;
                 // typed wrapper from src/natives/all.h
                 std::string license = cfx::natives::GetPlayerIdentifierByType(source, "license2");
-                cfx::trace("%s [%s] (%d) has connected. Players Online: %zu\n", name.c_str(), license.c_str(), source, players->size());
+                std::println("{} [{}] ({}) has connected. Players Online: {}", name, license, source, players->size());
         });
 
         cfx::on("playerDropped", [players](int source, std::string reason)
@@ -57,17 +58,17 @@ Server
                 std::string name = players->count(source) ? (*players)[source] : "Unknown";
                 std::string license = cfx::natives::GetPlayerIdentifierByType(source, "license2");
                 players->erase(source);
-                cfx::trace("%s [%s] (%d) has disconnected (%s). Players Online: %zu\n", name.c_str(), license.c_str(), source, reason.c_str(), players->size());
+                std::println("{} [{}] ({}) has disconnected ({}). Players Online: {}", name, license, source, reason, players->size());
         });
 
         cfx::onNet("chatMessage", [players](int source, int author, std::string name, std::string message)
         {
-                cfx::trace("%s (%d) has sent a chat message: %s\n", name.c_str(), author, message.c_str());
+                std::println("{} ({}) has sent a chat message: {}", name, author, message);
         });
 
         cfx::addStateBagChangeHandler("", "", [](const std::string& bagName, const std::string& key, const cfx::json::Value& value, int source, bool replicated)
         {
-                cfx::trace("[cfx::addStateBagChangeHandler] %s:%s changed (source=%d, replicated=%s)\n", bagName.c_str(), key.c_str(), source, replicated ? "true" : "false");
+                std::println("[cfx::addStateBagChangeHandler] {}:{} changed (source={}, replicated={})", bagName, key, source, replicated);
         });
 
         cfx::addExport("getPlayerInfo", [](cfx::EventArgs args) -> cfx::json::Value
@@ -83,18 +84,18 @@ Server
 
         cfx::setTimeout(5000, []()
         {
-                cfx::trace("[cfx::setTimeout] 5 seconds since start.\n");
+                std::println("[cfx::setTimeout] 5 seconds since start.");
         });
 
         auto minutes = std::make_shared<int>(0);
         cfx::setInterval(60000, [minutes]()
         {
-                cfx::trace("[cfx::setInterval] Up for %d minute(s).\n", ++*minutes);
+                std::println("[cfx::setInterval] Up for {} minute(s).", ++*minutes);
         });
 
         int32_t worker = cfx::createWorker("countPrimes", "100000");
         if (worker < 0)
-                cfx::trace("[cfx::createWorker] Failed to start worker (%d).\n", worker);
+                std::println("[cfx::createWorker] Failed to start worker ({}).", worker);
         else
         {
                 auto poll = std::make_shared<int32_t>(0);
@@ -105,9 +106,9 @@ Server
                                 return;
                         cfx::clearInterval(*poll);
                         if (result.isDone())
-                                cfx::trace("[cfx::createWorker] %s primes below 100000.\n", result.output.c_str());
+                                std::println("[cfx::createWorker] {} primes below 100000.", result.output);
                         else
-                                cfx::trace("[cfx::createWorker] Worker failed (%d).\n", result.status);
+                                std::println("[cfx::createWorker] Worker failed ({}).", result.status);
                 });
         }
 
@@ -117,7 +118,7 @@ Server
                         return;
                 std::string name = cfx::getCurrentResourceName();
                 cfx::json::Value info = cfx::callExport(name, "getPlayerInfo", { source });
-                cfx::trace("[cfx::addExport] %s\n", info.asStr("failed").c_str());
+                std::println("[cfx::addExport] {}", info.asStr("failed"));
                 cfx::callExport("fw", "SendChatMessage", { source, "^#f0a0e4[INFO] ^#ffffffHello from ^#f0a0e4C++^#ffffff!" });
         }, false);
 }
