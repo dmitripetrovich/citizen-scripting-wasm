@@ -25,10 +25,11 @@ case "$SRC" in
                 [[ $# -eq 0 ]] || { echo "Error: Rust helpers are pulled in with mod, pass only the script" >&2; exit 2; }
                 RLIB="$SDK_DIR/build/libcfx.rlib"
                 RLIB_SRC="$SDK_DIR/include/RustSdk.rs"
+                RLIB_NATIVES="$SDK_DIR/src/natives/all.rs"
                 read_flags g_rlibFlags
                 RLIB_KEY="$(rustc -V) ${FLAGS[*]}"
 
-                if [[ ! -f "$RLIB" ]] || [[ "$RLIB_SRC" -nt "$RLIB" ]] || [[ "$(cat "$RLIB.key" 2>/dev/null)" != "$RLIB_KEY" ]]; then
+                if [[ ! -f "$RLIB" ]] || [[ "$RLIB_SRC" -nt "$RLIB" ]] || [[ "$RLIB_NATIVES" -nt "$RLIB" ]] || [[ "$(cat "$RLIB.key" 2>/dev/null)" != "$RLIB_KEY" ]]; then
                         mkdir -p "$(dirname "$RLIB")"
                         rustc "${FLAGS[@]}" "$RLIB_SRC" -o "$RLIB"
                         printf '%s' "$RLIB_KEY" > "$RLIB.key"
