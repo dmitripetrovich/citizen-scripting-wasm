@@ -437,6 +437,7 @@ def native_type_kinds(native: dict) -> tuple[str, str] | None:
 
 def generate_type_table(natives: list[dict]) -> tuple[str, int]:
         table: dict[int, tuple[str, str]] = {}
+        names: dict[int, str] = {}
         for n in natives:
                 try:
                         h = int(n.get("hash", ""), 16)
@@ -450,7 +451,8 @@ def generate_type_table(natives: list[dict]) -> tuple[str, int]:
                         table[h] = None
                         continue
                 table.setdefault(h, kinds)
-        rows = [f"        {{ 0x{h:016X}ULL, \"{a}\", \"{r}\" }}," for h, k in sorted(table.items()) if k is not None for a, r in [k]]
+                names.setdefault(h, n.get("name", ""))
+        rows = [f"        {{ 0x{h:016X}ULL, \"{names[h]}\", \"{a}\", \"{r}\" }}," for h, k in sorted(table.items()) if k is not None for a, r in [k]]
         out = "// Auto-generated, do not edit.\n#pragma once\n\nstatic constexpr NativeTypeInfo g_nativeTypes[] = {\n"
         out += "\n".join(rows)
         out += "\n};\n"

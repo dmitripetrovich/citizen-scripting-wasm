@@ -465,6 +465,7 @@ static wasm_trap_t* CbTrace(void* env, wasmtime_caller_t* caller, const wasmtime
 struct NativeTypeInfo
 {
         uint64_t hash;
+        const char* name;
         const char* args;
         const char* results;
 };
@@ -511,7 +512,7 @@ static std::string TranslateNativeArgs(const WasmMem& mem, std::string_view kind
                 else
                         valid = off < mem.sz && memchr(mem.base + off, 0, mem.sz - off) != nullptr;
                 if (!valid)
-                        return "argument " + std::to_string(i) + " does not point to valid wasm memory";
+                        return "argument " + std::to_string(i + 1) + " does not point to valid wasm memory";
                 hostCtx.arguments[i] = off == 0 ? 0 : reinterpret_cast<uintptr_t>(mem.base + off);
         }
         return { };
@@ -538,7 +539,7 @@ static wasm_trap_t* CbInvokeNative(void* env, wasmtime_caller_t* caller, const w
         hostCtx.numArguments = static_cast<int>(argKinds.size());
         hostCtx.numResults = static_cast<int>(resultKinds.size());
         if (!info)
-                mod->lastNativeError = "native is not in the native type table";
+                mod->lastNativeError = "not a server native";
         else if (!rt->host())
                 mod->lastNativeError = "script host is gone";
         else
@@ -553,7 +554,8 @@ static wasm_trap_t* CbInvokeNative(void* env, wasmtime_caller_t* caller, const w
         {
                 char hash[19];
                 snprintf(hash, sizeof(hash), "0x%016llx", static_cast<unsigned long long>(wctx.hash));
-                ScriptPrint(rt->host(), rt->resourceName(), "^1SCRIPT ERROR: @" + rt->resourceName() + "/" + mod->scriptFile + ": native " + hash + " failed: " + mod->lastNativeError + "^7");
+                std::string name = info ? info->name : hash;
+                ScriptPrint(rt->host(), rt->resourceName(), "^1SCRIPT ERROR: @" + rt->resourceName() + "/" + mod->scriptFile + ": native " + name + " failed: " + mod->lastNativeError + "^7");
                 std::fill(std::begin(hostCtx.arguments), std::end(hostCtx.arguments), 0);
         }
         mod->lastNativeCtx = hostCtx;
