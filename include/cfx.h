@@ -462,6 +462,9 @@ struct Value
                 return nullValue();
         }
 
+        template<typename... TArgs>
+        Value call(TArgs&&... args) const;
+
         static Value array(std::vector<Value> items)
         {
                 Value v;
@@ -2166,6 +2169,26 @@ inline std::vector<uint8_t> invokeFunctionReference(const std::string& ref, cons
         return result;
 }
 
+}
+
+template<typename... TArgs>
+fxw_internal::Value fxw_internal::Value::call(TArgs&&... args) const
+{
+        if (kind != Kind::FuncRef)
+                return { };
+        auto payload = encodeArgs(std::forward<TArgs>(args)...);
+        auto data = cfx::detail::invokeFunctionReference(scalar, payload.data(), static_cast<uint32_t>(payload.size()));
+        if (data.empty())
+                return { };
+        Value result = decode(data.data(), static_cast<uint32_t>(data.size()));
+        if (result.kind != Kind::Array)
+                return result;
+        return result.size() > 0 ? result.at(0) : Value();
+}
+
+namespace cfx::detail
+{
+
 template<typename T>
 struct fn_traits : fn_traits<decltype(&std::decay_t<T>::operator())> { };
 
@@ -2259,7 +2282,7 @@ json::Value InvokeTypedExport(F& fn, const std::string& name, const EventArgs& a
         ArgError error;
         if (!(decodeArg<std::decay_t<std::tuple_element_t<Is, ArgsTuple>>, Is>(args, std::get<Is>(values), error) && ...))
         {
-                fxw_internal::traceMessage("export '" + name + "' argument " + std::to_string(error.index + 1) + ": " + error.reason + ", call skipped\n");
+                fxw_internal::traceMessage(name + " argument " + std::to_string(error.index + 1) + ": " + error.reason + ", call skipped\n");
                 return { };
         }
         using Result = decltype(fn(std::move(std::get<Is>(values))...));
@@ -2885,22 +2908,46 @@ inline void removeStateBagChangeHandler(int32_t cookie)
         }
 }
 
+namespace detail
+{
+        template<typename F>
+        ExportHandler toExportHandler(const std::string& name, F&& fn)
+        {
+                if constexpr (std::is_convertible_v<std::decay_t<F>, ExportHandler>)
+                        return ExportHandler(std::forward<F>(fn));
+                else
+                        return WrapTypedExport(name, std::forward<F>(fn));
+        }
+
+        inline std::string createHandlerRef(ExportHandler handler)
+        {
+                return createCanonicalRef([handler](const uint8_t* args, uint32_t argsSize) -> std::vector<uint8_t>
+                {
+                        auto decoded = fxw_internal::decode(args, argsSize);
+                        fxw_internal::ensureArray(decoded);
+                        EventArgs ea(std::move(decoded));
+                        json::Value result = handler(ea);
+                        return fxw_internal::encode(fxw_internal::Value::array({ std::move(result) }));
+                });
+        }
+}
+
+template<typename F>
+inline json::Value callback(F&& fn)
+{
+        std::string ref = detail::createHandlerRef(detail::toExportHandler("callback", std::forward<F>(fn)));
+        if (ref.empty())
+                return { };
+        fxw_internal::Value value;
+        value.kind = fxw_internal::Value::Kind::FuncRef;
+        value.initScalar(ref);
+        return value;
+}
+
 template<typename F>
 inline void addExport(const std::string& name, F&& fn)
 {
-        ExportHandler handler;
-        if constexpr (std::is_convertible_v<std::decay_t<F>, ExportHandler>)
-                handler = ExportHandler(std::forward<F>(fn));
-        else
-                handler = detail::WrapTypedExport(name, std::forward<F>(fn));
-        std::string exportRef = detail::createCanonicalRef([handler](const uint8_t* args, uint32_t argsSize) -> std::vector<uint8_t>
-        {
-                auto decoded = fxw_internal::decode(args, argsSize);
-                fxw_internal::ensureArray(decoded);
-                EventArgs ea(std::move(decoded));
-                json::Value result = handler(ea);
-                return fxw_internal::encode(fxw_internal::Value::array({ std::move(result) }));
-        });
+        std::string exportRef = detail::createHandlerRef(detail::toExportHandler("export '" + name + "'", std::forward<F>(fn)));
         if (exportRef.empty())
                 return;
         std::string resName = getCurrentResourceName();

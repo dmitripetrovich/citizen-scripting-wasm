@@ -212,6 +212,15 @@ impl Value {
                 match self { Value::Object(entries) => entries.iter().any(|(k, _)| k == key), _ => false }
         }
         pub fn is_func_ref(&self) -> bool { matches!(self, Value::FuncRef(_)) }
+        pub fn call(&self, args: &[Value]) -> Value {
+                let r = match self { Value::FuncRef(r) => r, _ => return Value::Null };
+                let data = invoke_function_reference(r, &encode(&Value::Array(args.to_vec())));
+                if data.is_empty() { return Value::Null; }
+                match decode(&data) {
+                        Value::Array(values) => values.into_iter().next().unwrap_or(Value::Null),
+                        other => other,
+                }
+        }
         pub fn func_ref_str(&self) -> &str {
                 match self { Value::FuncRef(s) => s, _ => "" }
         }
@@ -529,7 +538,7 @@ macro_rules! impl_typed_export_handler {
                                         match decoded {
                                                 Ok(_values) => self($(_values.$i),*).into(),
                                                 Err(error) => {
-                                                        trace_str(&format!("export '{}' argument {}: {}, call skipped\n", name, error.index + 1, error.reason));
+                                                        trace_str(&format!("{} argument {}: {}, call skipped\n", name, error.index + 1, error.reason));
                                                         Value::Null
                                                 }
                                         }
@@ -561,7 +570,7 @@ macro_rules! impl_async_export_handler {
                                         match decoded {
                                                 Ok(_values) => start_async_export(self($(_values.$i),*)),
                                                 Err(error) => {
-                                                        trace_str(&format!("export '{}' argument {}: {}, call skipped\n", name, error.index + 1, error.reason));
+                                                        trace_str(&format!("{} argument {}: {}, call skipped\n", name, error.index + 1, error.reason));
                                                         Value::Null
                                                 }
                                         }
@@ -1112,18 +1121,21 @@ pub fn on_resource_stop(handler: impl Fn(&str) + 'static) -> i32 {
         })
 }
 
+fn create_handler_ref(handler: ExportHandlerFn) -> String {
+        let (r, _) = create_canonical_ref(Rc::new(move |args_data: &[u8]| -> Vec<u8> {
+                let ea = EventArgs::new(ensure_array(decode(args_data)));
+                encode(&Value::Array(vec![handler(&ea)]))
+        }));
+        r
+}
+
+pub fn callback<M>(handler: impl IntoExportHandler<M>) -> Value {
+        let r = create_handler_ref(handler.into_export_handler("callback"));
+        if r.is_empty() { Value::Null } else { Value::FuncRef(r) }
+}
+
 pub fn add_export<M>(name: &str, handler: impl IntoExportHandler<M>) {
-        let handler = handler.into_export_handler(name);
-        let export_ref = {
-                let handler = handler.clone();
-                let (s, _) = create_canonical_ref(Rc::new(move |args_data: &[u8]| -> Vec<u8> {
-                        let decoded = ensure_array(decode(args_data));
-                        let ea = EventArgs::new(decoded);
-                        let result = handler(&ea);
-                        encode(&Value::Array(vec![result]))
-                }));
-                s
-        };
+        let export_ref = create_handler_ref(handler.into_export_handler(&format!("export '{}'", name)));
         if export_ref.is_empty() { return; }
         let res_name = get_current_resource_name();
         let event_name = format!("__cfx_export_{}_{}", res_name, name);
