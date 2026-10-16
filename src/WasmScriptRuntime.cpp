@@ -2347,7 +2347,6 @@ static void pruneOldSdks(const std::string& root, const std::string& keep)
         DIR* d = opendir(root.c_str());
         if (!d)
                 return;
-        time_t cutoff = time(nullptr) - 7 * 24 * 60 * 60;
         while (dirent* e = readdir(d))
         {
                 std::string_view name(e->d_name);
@@ -2355,7 +2354,7 @@ static void pruneOldSdks(const std::string& root, const std::string& keep)
                         continue;
                 std::string path = root + "/" + std::string(name);
                 struct stat st;
-                if (lstat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode) && st.st_mtime < cutoff)
+                if (lstat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
                         removeTree(path);
         }
         closedir(d);
@@ -2385,7 +2384,6 @@ static std::string getCachedSdkPath()
                                 return { };
                 }
         }
-        utimensat(AT_FDCWD, path.c_str(), nullptr, 0);
         pruneOldSdks(root, name);
         return path;
 }
