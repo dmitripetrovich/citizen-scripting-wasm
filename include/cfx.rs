@@ -236,7 +236,11 @@ impl From<u32> for Value { fn from(v: u32) -> Self { Value::Int(v as i64) } }
 impl From<u64> for Value { fn from(v: u64) -> Self { if v > i64::MAX as u64 { Value::Float(v as f64) } else { Value::Int(v as i64) } } }
 impl From<usize> for Value { fn from(v: usize) -> Self { Value::from(v as u64) } }
 impl From<isize> for Value { fn from(v: isize) -> Self { Value::Int(v as i64) } }
-impl From<Vec<Value>> for Value { fn from(v: Vec<Value>) -> Self { Value::Array(v) } }
+impl<T: Into<Value>> From<Vec<T>> for Value { fn from(v: Vec<T>) -> Self { Value::Array(v.into_iter().map(Into::into).collect()) } }
+impl<T: Into<Value>, const N: usize> From<[T; N]> for Value { fn from(v: [T; N]) -> Self { Value::Array(v.into_iter().map(Into::into).collect()) } }
+impl<T: Into<Value>> From<Option<T>> for Value { fn from(v: Option<T>) -> Self { v.map_or(Value::Null, Into::into) } }
+impl<K: Into<String>, T: Into<Value>> From<HashMap<K, T>> for Value { fn from(v: HashMap<K, T>) -> Self { Value::Object(v.into_iter().map(|(k, t)| (k.into(), t.into())).collect()) } }
+impl<K: Into<String>, T: Into<Value>> From<std::collections::BTreeMap<K, T>> for Value { fn from(v: std::collections::BTreeMap<K, T>) -> Self { Value::Object(v.into_iter().map(|(k, t)| (k.into(), t.into())).collect()) } }
 impl From<f64> for Value { fn from(v: f64) -> Self { Value::Float(v) } }
 impl From<f32> for Value { fn from(v: f32) -> Self { Value::Float(v as f64) } }
 impl From<bool> for Value { fn from(v: bool) -> Self { Value::Bool(v) } }

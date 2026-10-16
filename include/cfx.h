@@ -373,6 +373,37 @@ struct Value
         }
         Value(std::string s) : kind(Kind::String), scalar(std::move(s)) { }
 
+        Value(std::nullopt_t) : Value() { }
+
+        template<typename T>
+        Value(const std::optional<T>& v) : Value()
+        {
+                if (v)
+                        *this = Value(*v);
+        }
+
+        template<typename T>
+                requires (!std::is_convertible_v<const T&, std::string_view> && !std::is_same_v<std::remove_cvref_t<T>, Value> && requires (const T& t) { t.begin(); t.end(); })
+        Value(const T& items) : Value()
+        {
+                if constexpr (requires { typename T::key_type; typename T::mapped_type; })
+                {
+                        static_assert(std::is_convertible_v<const typename T::key_type&, std::string>, "cfx: map keys must be strings");
+                        kind = Kind::Object;
+                        for (const auto& [key, item] : items)
+                        {
+                                keys.emplace_back(key);
+                                children.emplace_back(item);
+                        }
+                }
+                else
+                {
+                        kind = Kind::Array;
+                        for (const auto& item : items)
+                                children.emplace_back(item);
+                }
+        }
+
         void initScalar(std::string s)
         {
                 new (&scalar) std::string(std::move(s));
