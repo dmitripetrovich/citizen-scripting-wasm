@@ -469,7 +469,7 @@ struct Value
 
         const Value& at(size_t i) const
         {
-                return i < children.size() ? children[i] : nullValue();
+                return kind == Kind::Array && i < children.size() ? children[i] : nullValue();
         }
 
         bool has(std::string_view key) const
@@ -491,6 +491,11 @@ struct Value
                 if (it != m_keyIndex->end() && it->second < children.size())
                         return children[it->second];
                 return nullValue();
+        }
+
+        const Value& operator[](size_t i) const
+        {
+                return at(i);
         }
 
         template<typename... TArgs>

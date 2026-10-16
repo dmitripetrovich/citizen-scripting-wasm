@@ -172,6 +172,21 @@ impl Default for Value {
         fn default() -> Self { Value::Null }
 }
 
+impl std::ops::Index<&str> for Value {
+        type Output = Value;
+        fn index(&self, key: &str) -> &Value { self.get(key) }
+}
+
+impl std::ops::Index<&String> for Value {
+        type Output = Value;
+        fn index(&self, key: &String) -> &Value { self.get(key) }
+}
+
+impl std::ops::Index<usize> for Value {
+        type Output = Value;
+        fn index(&self, i: usize) -> &Value { self.at(i) }
+}
+
 impl Value {
         pub fn as_str(&self) -> &str {
                 match self { Value::String(s) => s, _ => "" }
