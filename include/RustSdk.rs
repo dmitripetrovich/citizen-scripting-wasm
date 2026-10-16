@@ -219,6 +219,7 @@ impl From<f32> for Value { fn from(v: f32) -> Self { Value::Float(v as f64) } }
 impl From<bool> for Value { fn from(v: bool) -> Self { Value::Bool(v) } }
 impl From<&str> for Value { fn from(v: &str) -> Self { Value::String(v.to_string()) } }
 impl From<String> for Value { fn from(v: String) -> Self { Value::String(v) } }
+impl From<()> for Value { fn from(_: ()) -> Self { Value::Null } }
 pub struct MsgpackWriter {
         pub buf: Vec<u8>,
 }
@@ -491,6 +492,47 @@ impl<F: Fn(i32, &EventArgs) + 'static> IntoEventHandler<RawEventHandler> for F {
 fn report_arg_error(event: &str, error: ArgError) {
         trace_str(&format!("event '{}' argument {}: {}, handler skipped\n", event, error.index + 1, error.reason));
 }
+
+type ExportHandlerFn = Rc<dyn Fn(&EventArgs) -> Value>;
+
+pub struct RawExportHandler;
+
+pub trait IntoExportHandler<M> {
+        fn into_export_handler(self, name: &str) -> ExportHandlerFn;
+}
+
+impl<F: Fn(&EventArgs) -> Value + 'static> IntoExportHandler<RawExportHandler> for F {
+        fn into_export_handler(self, _name: &str) -> ExportHandlerFn { Rc::new(self) }
+}
+
+macro_rules! impl_typed_export_handler {
+        ($($t:ident $i:tt),*) => {
+                impl<F, R: Into<Value>, $($t: FromArg),*> IntoExportHandler<(R, $($t,)*)> for F where F: Fn($($t),*) -> R + 'static {
+                        fn into_export_handler(self, name: &str) -> ExportHandlerFn {
+                                let name = name.to_string();
+                                Rc::new(move |_args: &EventArgs| -> Value {
+                                        let decoded = (|| -> Result<($($t,)*), ArgError> { Ok(($(decode_arg::<$t>(_args, $i)?,)*)) })();
+                                        match decoded {
+                                                Ok(_values) => self($(_values.$i),*).into(),
+                                                Err(error) => {
+                                                        trace_str(&format!("export '{}' argument {}: {}, call skipped\n", name, error.index + 1, error.reason));
+                                                        Value::Null
+                                                }
+                                        }
+                                })
+                        }
+                }
+        };
+}
+impl_typed_export_handler!();
+impl_typed_export_handler!(A 0);
+impl_typed_export_handler!(A 0, B 1);
+impl_typed_export_handler!(A 0, B 1, C 2);
+impl_typed_export_handler!(A 0, B 1, C 2, D 3);
+impl_typed_export_handler!(A 0, B 1, C 2, D 3, E 4);
+impl_typed_export_handler!(A 0, B 1, C 2, D 3, E 4, F5 5);
+impl_typed_export_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6);
+impl_typed_export_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6, H 7);
 
 macro_rules! impl_typed_event_handler {
         ($($t:ident $i:tt),*) => {
@@ -988,8 +1030,8 @@ pub fn on_resource_stop(handler: impl Fn(&str) + 'static) -> i32 {
         })
 }
 
-pub fn add_export(name: &str, handler: impl Fn(&EventArgs) -> Value + 'static) {
-        let handler = std::rc::Rc::new(handler);
+pub fn add_export<M>(name: &str, handler: impl IntoExportHandler<M>) {
+        let handler = handler.into_export_handler(name);
         let export_ref = {
                 let handler = handler.clone();
                 let (s, _) = create_canonical_ref(Rc::new(move |args_data: &[u8]| -> Vec<u8> {

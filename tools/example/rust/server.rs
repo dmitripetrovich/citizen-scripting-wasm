@@ -57,14 +57,11 @@ Server! {
                 println!("[cfx::add_state_bag_change_handler] {}:{} changed (source={}, replicated={})", bag_name, key, source, replicated);
         });
 
-        cfx::add_export("getPlayerInfo", |args| {
-                if args.is_empty() {
-                        return cfx::Value::from("unknown");
-                }
-                let src = std::ffi::CString::new(args.int(0).to_string()).unwrap_or_default();
+        cfx::add_export("getPlayerInfo", |source: i32| {
+                let src = std::ffi::CString::new(source.to_string()).unwrap_or_default();
                 let name = cfx::native_string("GET_PLAYER_NAME", &[cfx::NativeArg::ptr(src.as_ptr() as u64)]);
                 let ping = cfx::native_int("GET_PLAYER_PING", &[cfx::NativeArg::ptr(src.as_ptr() as u64)]);
-                cfx::Value::from(format!("{} (ping={}ms)", name, ping))
+                format!("{} (ping={}ms)", name, ping)
         });
 
         cfx::set_timeout(5000, || {

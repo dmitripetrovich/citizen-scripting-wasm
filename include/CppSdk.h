@@ -2171,6 +2171,35 @@ EventHandler WrapTypedHandler(const std::string& event, F&& fn)
         };
 }
 
+template<typename F, typename ArgsTuple, size_t... Is>
+json::Value InvokeTypedExport(F& fn, const std::string& name, const EventArgs& args, std::index_sequence<Is...>)
+{
+        std::tuple<std::decay_t<std::tuple_element_t<Is, ArgsTuple>>...> values;
+        ArgError error;
+        if (!(decodeArg<std::decay_t<std::tuple_element_t<Is, ArgsTuple>>, Is>(args, std::get<Is>(values), error) && ...))
+        {
+                fxw_internal::traceMessage("export '" + name + "' argument " + std::to_string(error.index + 1) + ": " + error.reason + ", call skipped\n");
+                return { };
+        }
+        if constexpr (std::is_void_v<decltype(fn(std::move(std::get<Is>(values))...))>)
+        {
+                fn(std::move(std::get<Is>(values))...);
+                return { };
+        }
+        else
+                return json::Value(fn(std::move(std::get<Is>(values))...));
+}
+
+template<typename F>
+ExportHandler WrapTypedExport(const std::string& name, F&& fn)
+{
+        using args_tuple = typename fn_traits<std::decay_t<F>>::tuple_type;
+        return [name, f = std::forward<F>(fn)](const EventArgs& args) mutable -> json::Value
+        {
+                return InvokeTypedExport<decltype(f), args_tuple>(f, name, args, std::make_index_sequence<std::tuple_size_v<args_tuple>>{ });
+        };
+}
+
 }
 
 namespace cfx
@@ -2769,8 +2798,14 @@ inline void removeStateBagChangeHandler(int32_t cookie)
         }
 }
 
-inline void addExport(const std::string& name, ExportHandler handler)
+template<typename F>
+inline void addExport(const std::string& name, F&& fn)
 {
+        ExportHandler handler;
+        if constexpr (std::is_convertible_v<std::decay_t<F>, ExportHandler>)
+                handler = ExportHandler(std::forward<F>(fn));
+        else
+                handler = detail::WrapTypedExport(name, std::forward<F>(fn));
         std::string exportRef = detail::createCanonicalRef([handler](const uint8_t* args, uint32_t argsSize) -> std::vector<uint8_t>
         {
                 auto decoded = fxw_internal::decode(args, argsSize);

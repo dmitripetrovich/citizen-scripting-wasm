@@ -71,11 +71,9 @@ Server
                 std::println("[cfx::addStateBagChangeHandler] {}:{} changed (source={}, replicated={})", bagName, key, source, replicated);
         });
 
-        cfx::addExport("getPlayerInfo", [](cfx::EventArgs args) -> cfx::json::Value
+        cfx::addExport("getPlayerInfo", [](int source)
         {
-                if (args.size() == 0)
-                        return "unknown";
-                std::string src = std::to_string(args.get<int>(0));
+                std::string src = std::to_string(source);
                 // string-based alternative (works without native includes)
                 std::string name = cfx::native<std::string>("GET_PLAYER_NAME", src.c_str());
                 int ping = cfx::native<int>("GET_PLAYER_PING", src.c_str());
