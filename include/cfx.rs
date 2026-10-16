@@ -925,6 +925,19 @@ pub fn invoke_native_string(hash: u64, args: &[NativeArg]) -> String {
         get_string_result(&ctx, 0)
 }
 
+pub fn invoke_native_object(hash: u64, args: &[NativeArg]) -> Value {
+        let ctx = invoke_native_raw(hash, args, 3, 0x1);
+        let data = get_binary_result(&ctx, 0, 1);
+        if data.is_empty() { Value::Null } else { decode(&data) }
+}
+
+pub fn invoke_native_entities(hash: u64, args: &[NativeArg]) -> Vec<i32> {
+        match invoke_native_object(hash, args) {
+                Value::Array(list) => list.iter().map(Value::as_int).collect(),
+                _ => Vec::new(),
+        }
+}
+
 pub fn invoke_native_vector3(hash: u64, args: &[NativeArg]) -> Vector3 {
         let ctx = invoke_native_raw(hash, args, 3, 0);
         Vector3 {

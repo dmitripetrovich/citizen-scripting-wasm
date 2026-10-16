@@ -164,6 +164,9 @@ def to_safe_param(name: str) -> str:
         return name + "_" if name in keywords else name
 
 
+ENTITY_LIST_NATIVES = {"GET_ALL_OBJECTS", "GET_ALL_PEDS", "GET_ALL_VEHICLES", "GET_GAME_POOL", "GET_ENTITIES_IN_RADIUS"}
+
+
 def generate_wrapper(native: dict) -> str | None:
         name = native.get("name")
         if not name or name.startswith("0x") or name.startswith("_0x"):
@@ -172,17 +175,24 @@ def generate_wrapper(native: dict) -> str | None:
         params = native.get("params", [])
         result_type = native.get("results", "void")
         if result_type == "object":
+                cpp_ret, invoke_ret = ("std::vector<int>", "entities") if name in ENTITY_LIST_NATIVES else ("cfx::Value", "object")
+        elif result_type in RETURN_TYPE_MAP:
+                cpp_ret, invoke_ret = RETURN_TYPE_MAP[result_type]
+        else:
                 return None
-        if result_type not in RETURN_TYPE_MAP:
-                return None
-        cpp_ret, invoke_ret = RETURN_TYPE_MAP[result_type]
         func_name = screaming_to_pascal(name)
         cpp_params = []
         call_args = []
+        prelude = []
         skip = False
         for p in params:
                 ptype = p.get("type", "int")
                 pname = to_safe_param(p.get("name", "p"))
+                if ptype == "object":
+                        cpp_params.append(f"const cfx::Value& {pname}")
+                        prelude.append(f"auto {pname}Data = fxw_internal::encode({pname});")
+                        call_args += [f"{pname}Data.data()", f"static_cast<int>({pname}Data.size())"]
+                        continue
                 if ptype not in PARAM_TYPE_MAP:
                         skip = True
                         break
@@ -196,8 +206,13 @@ def generate_wrapper(native: dict) -> str | None:
         comma_args = f", {args_str}" if args_str else ""
         if invoke_ret is None:
                 body = f"invoke({hash_str}{comma_args});"
+        elif invoke_ret == "object":
+                body = f"return invokeObject({hash_str}{comma_args});"
+        elif invoke_ret == "entities":
+                body = f"return invokeEntities({hash_str}{comma_args});"
         else:
                 body = f"return invoke<{invoke_ret}>({hash_str}{comma_args});"
+        body = "".join(f"{line}\n                " for line in prelude) + body
 
         wrapper = f"        inline {cpp_ret} {func_name}({param_str})\n        {{\n                {body}\n        }}"
         if not any(p.get("type") == "char*" and p.get("name") == "playerSrc" for p in params):
@@ -297,10 +312,12 @@ def generate_rust_wrapper(native: dict) -> str | None:
         hash_str = native.get("hash", "0x0")
         params = native.get("params", [])
         result_type = native.get("results", "void")
-        if result_type == "object" or result_type not in RUST_RETURN_TYPE_MAP:
+        if result_type == "object":
+                rust_ret, invoke_fn = ("Vec<i32>", "invoke_native_entities") if name in ENTITY_LIST_NATIVES else ("crate::Value", "invoke_native_object")
+        elif result_type in RUST_RETURN_TYPE_MAP:
+                rust_ret, invoke_fn = RUST_RETURN_TYPE_MAP[result_type]
+        else:
                 return None
-
-        rust_ret, invoke_fn = RUST_RETURN_TYPE_MAP[result_type]
         func_name = screaming_to_snake(name)
 
         rust_params = []
@@ -308,10 +325,18 @@ def generate_rust_wrapper(native: dict) -> str | None:
         arg_exprs = []
         skip = False
         str_idx = 0
+        obj_idx = 0
 
         for p in params:
                 ptype = p.get("type", "int")
                 pname = to_safe_rust_param(p.get("name", "p").lower())
+                if ptype == "object":
+                        var = f"_o{obj_idx}"
+                        obj_idx += 1
+                        rust_params.append(f"{pname}: impl Into<crate::Value>")
+                        cstring_decls.append(f"                let {var} = crate::encode(&{pname}.into());")
+                        arg_exprs += [f"crate::NativeArg::ptr({var}.as_ptr() as u64)", f"crate::NativeArg::val({var}.len() as u64)"]
+                        continue
                 if ptype not in RUST_PARAM_TYPE_MAP:
                         skip = True
                         break

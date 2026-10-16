@@ -2519,6 +2519,27 @@ inline TResult invoke(uint64_t hash, TArgs&&... args)
         }
 }
 
+template<typename... TArgs>
+inline cfx::Value invokeObject(uint64_t hash, TArgs&&... args)
+{
+        auto ctx = detail::invokeWithMask(hash, 0x1, std::forward<TArgs>(args)...);
+        auto data = cfx::getBinaryResult(ctx, 0, 1);
+        if (data.empty())
+                return { };
+        return fxw_internal::decode(data.data(), static_cast<uint32_t>(data.size()));
+}
+
+template<typename... TArgs>
+inline std::vector<int> invokeEntities(uint64_t hash, TArgs&&... args)
+{
+        cfx::Value list = invokeObject(hash, std::forward<TArgs>(args)...);
+        std::vector<int> entities;
+        entities.reserve(list.size());
+        for (size_t i = 0; i < list.size(); ++i)
+                entities.push_back(list[i].asInt());
+        return entities;
+}
+
 }
 
 namespace cfx
