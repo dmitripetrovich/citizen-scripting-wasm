@@ -23,7 +23,7 @@ PARAM_TYPE_MAP = {
         "BOOL": "bool",
         "bool": "bool",
         "char*": "const char*",
-        "Hash": "uint32_t",
+        "Hash": "int",
         "Entity": "int",
         "Player": "int",
         "Vehicle": "int",
@@ -40,7 +40,7 @@ PARAM_TYPE_MAP = {
         "int*": "int*",
         "float*": "float*",
         "BOOL*": "int*",
-        "Hash*": "uint32_t*",
+        "Hash*": "int*",
         "Entity*": "int*",
         "Player*": "int*",
         "Vehicle*": "int*",
@@ -63,7 +63,7 @@ RUST_PARAM_TYPE_MAP = {
         "BOOL": ("bool", "val", "if {p} {{ 1u64 }} else {{ 0u64 }}"),
         "bool": ("bool", "val", "if {p} {{ 1u64 }} else {{ 0u64 }}"),
         "char*": ("&str", "str", None),
-        "Hash": ("u32", "val", "{p} as u64"),
+        "Hash": ("i32", "val", "{p} as u32 as u64"),
         "Entity": ("i32", "val", "{p} as u32 as u64"),
         "Player": ("i32", "val", "{p} as u32 as u64"),
         "Vehicle": ("i32", "val", "{p} as u32 as u64"),
@@ -80,7 +80,7 @@ RUST_PARAM_TYPE_MAP = {
         "int*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
         "float*": ("&mut f32", "ptr", "{p} as *mut f32 as u64"),
         "BOOL*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
-        "Hash*": ("&mut u32", "ptr", "{p} as *mut u32 as u64"),
+        "Hash*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
         "Entity*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
         "Player*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
         "Vehicle*": ("&mut i32", "ptr", "{p} as *mut i32 as u64"),
@@ -104,7 +104,7 @@ RUST_RETURN_TYPE_MAP = {
         "BOOL": ("bool", "invoke_native_bool"),
         "bool": ("bool", "invoke_native_bool"),
         "char*": ("String", "invoke_native_string"),
-        "Hash": ("u32", "invoke_native_int"),
+        "Hash": ("i32", "invoke_native_int"),
         "Entity": ("i32", "invoke_native_int"),
         "Player": ("i32", "invoke_native_int"),
         "Vehicle": ("i32", "invoke_native_int"),
@@ -137,7 +137,7 @@ RETURN_TYPE_MAP = {
         "BOOL": ("bool", "bool"),
         "bool": ("bool", "bool"),
         "char*": ("std::string", "std::string"),
-        "Hash": ("uint32_t", "uint32_t"),
+        "Hash": ("int", "int"),
         "Entity": ("int", "int"),
         "Player": ("int", "int"),
         "Vehicle": ("int", "int"),
@@ -365,9 +365,6 @@ def generate_rust_wrapper(native: dict) -> str | None:
         if rust_ret is None:
                 sig = f"pub fn {func_name}({param_str})"
                 body = f"crate::{invoke_fn}({hash_str}, &[{args_str}]);"
-        elif result_type == "Hash":
-                sig = f"pub fn {func_name}({param_str}) -> u32"
-                body = f"crate::invoke_native_int({hash_str}, &[{args_str}]) as u32"
         else:
                 sig = f"pub fn {func_name}({param_str}) -> {rust_ret}"
                 body = f"crate::{invoke_fn}({hash_str}, &[{args_str}])"
