@@ -2835,8 +2835,26 @@ inline std::vector<std::string> getResources()
         return result;
 }
 
+namespace detail
+{
+        inline void ensureEntityStateBag(int entity)
+        {
+                invokeNative(HashString("ENSURE_ENTITY_STATE_BAG"), { NativeArg(entity) });
+        }
+
+        inline std::string entityBag(int entity)
+        {
+                ensureEntityStateBag(entity);
+                int netId = static_cast<int32_t>(invokeNative(HashString("NETWORK_GET_NETWORK_ID_FROM_ENTITY"), { NativeArg(entity) }, 1).args[0]);
+                return "entity:" + std::to_string(netId);
+        }
+}
+
 inline void setStateBagValue(const std::string& bagName, const std::string& key, const json::Value& value, bool replicated = true)
 {
+        int netId = 0;
+        if (bagName.starts_with("entity:") && std::from_chars(bagName.data() + 7, bagName.data() + bagName.size(), netId).ec == std::errc())
+                detail::ensureEntityStateBag(static_cast<int32_t>(invokeNative(HashString("NETWORK_GET_ENTITY_FROM_NETWORK_ID"), { NativeArg(netId) }, 1).args[0]));
         auto encoded = fxw_internal::encode(value);
         invokeNative(HashString("SET_STATE_BAG_VALUE"), { NativeArg::ptr(bagName.c_str()), NativeArg::ptr(key.c_str()), NativeArg::ptr(encoded.data()), NativeArg(static_cast<int32_t>(encoded.size())), NativeArg(replicated ? 1 : 0) });
 }
@@ -2846,10 +2864,9 @@ inline void setPlayerState(int serverId, const std::string& key, const json::Val
         setStateBagValue("player:" + std::to_string(serverId), key, value, replicated);
 }
 
-inline void setEntityState(int netId, const std::string& key, const json::Value& value, bool replicated = true)
+inline void setEntityState(int entity, const std::string& key, const json::Value& value, bool replicated = true)
 {
-        invokeNative(HashString("ENSURE_ENTITY_STATE_BAG"), { NativeArg(netId) });
-        setStateBagValue("entity:" + std::to_string(netId), key, value, replicated);
+        setStateBagValue(detail::entityBag(entity), key, value, replicated);
 }
 
 inline void setGlobalState(const std::string& key, const json::Value& value, bool replicated = true)
@@ -2871,10 +2888,9 @@ inline json::Value getPlayerState(int serverId, const std::string& key)
         return getStateBagValue("player:" + std::to_string(serverId), key);
 }
 
-inline json::Value getEntityState(int netId, const std::string& key)
+inline json::Value getEntityState(int entity, const std::string& key)
 {
-        invokeNative(HashString("ENSURE_ENTITY_STATE_BAG"), { NativeArg(netId) });
-        return getStateBagValue("entity:" + std::to_string(netId), key);
+        return getStateBagValue(detail::entityBag(entity), key);
 }
 
 inline json::Value getGlobalState(const std::string& key)

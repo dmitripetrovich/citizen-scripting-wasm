@@ -262,6 +262,7 @@ impl From<bool> for Value { fn from(v: bool) -> Self { Value::Bool(v) } }
 impl From<&str> for Value { fn from(v: &str) -> Self { Value::String(v.to_string()) } }
 impl From<String> for Value { fn from(v: String) -> Self { Value::String(v) } }
 impl From<()> for Value { fn from(_: ()) -> Self { Value::Null } }
+impl From<&Value> for Value { fn from(v: &Value) -> Self { v.clone() } }
 
 pub trait IntoArgs {
         fn into_args(self) -> Vec<Value>;
@@ -1403,8 +1404,12 @@ pub fn remove_state_bag_change_handler(cookie: i32) {
         }
 }
 
-pub fn set_state_bag_value(bag: &str, key: &str, value: &Value, replicated: bool) {
-        let encoded = encode(value);
+pub fn set_state_bag_value(bag: &str, key: &str, value: impl Into<Value>, replicated: bool) {
+        if let Some(net_id) = bag.strip_prefix("entity:").and_then(|id| id.parse::<i32>().ok()) {
+                let entity = invoke_native_int(hash_string(b"NETWORK_GET_ENTITY_FROM_NETWORK_ID"), &[NativeArg::val(net_id as u32 as u64)]);
+                ensure_entity_state_bag(entity);
+        }
+        let encoded = encode(&value.into());
         let bag_cs = CString::new(bag).unwrap_or_default();
         let key_cs = CString::new(key).unwrap_or_default();
         invoke_native_void(hash_string(b"SET_STATE_BAG_VALUE"), &[NativeArg::ptr(bag_cs.as_ptr() as u64), NativeArg::ptr(key_cs.as_ptr() as u64), NativeArg::ptr(encoded.as_ptr() as u64), NativeArg::val(encoded.len() as u64), NativeArg::val(if replicated { 1 } else { 0 })]);
@@ -1436,26 +1441,33 @@ pub fn get_state_bag_keys(bag: &str) -> Vec<String> {
         }
 }
 
-pub fn set_player_state(server_id: i32, key: &str, value: &Value, replicated: bool) {
-        set_state_bag_value(&format!("player:{}", server_id), key, value, replicated);
+pub fn set_player_state(server_id: i32, key: &str, value: impl Into<Value>) {
+        set_state_bag_value(&format!("player:{}", server_id), key, value, true);
 }
 
 pub fn get_player_state(server_id: i32, key: &str) -> Value {
         get_state_bag_value(&format!("player:{}", server_id), key)
 }
 
-pub fn set_entity_state(net_id: i32, key: &str, value: &Value, replicated: bool) {
-        invoke_native_void(hash_string(b"ENSURE_ENTITY_STATE_BAG"), &[NativeArg::val(net_id as u32 as u64)]);
-        set_state_bag_value(&format!("entity:{}", net_id), key, value, replicated);
+fn ensure_entity_state_bag(entity: i32) {
+        invoke_native_void(hash_string(b"ENSURE_ENTITY_STATE_BAG"), &[NativeArg::val(entity as u32 as u64)]);
 }
 
-pub fn get_entity_state(net_id: i32, key: &str) -> Value {
-        invoke_native_void(hash_string(b"ENSURE_ENTITY_STATE_BAG"), &[NativeArg::val(net_id as u32 as u64)]);
-        get_state_bag_value(&format!("entity:{}", net_id), key)
+fn entity_bag(entity: i32) -> String {
+        ensure_entity_state_bag(entity);
+        format!("entity:{}", invoke_native_int(hash_string(b"NETWORK_GET_NETWORK_ID_FROM_ENTITY"), &[NativeArg::val(entity as u32 as u64)]))
 }
 
-pub fn set_global_state(key: &str, value: &Value, replicated: bool) {
-        set_state_bag_value("global", key, value, replicated);
+pub fn set_entity_state(entity: i32, key: &str, value: impl Into<Value>) {
+        set_state_bag_value(&entity_bag(entity), key, value, true);
+}
+
+pub fn get_entity_state(entity: i32, key: &str) -> Value {
+        get_state_bag_value(&entity_bag(entity), key)
+}
+
+pub fn set_global_state(key: &str, value: impl Into<Value>) {
+        set_state_bag_value("global", key, value, true);
 }
 
 pub fn get_global_state(key: &str) -> Value {
