@@ -745,7 +745,7 @@ struct Context {
         coroutines: HashMap<i32, CoroutineEntry>,
         next_coroutine_id: i32,
         earliest_resume: u64,
-        commands: HashMap<String, Vec<Rc<dyn Fn(i32, &[String])>>>,
+        commands: HashMap<String, Vec<Rc<dyn Fn(i32, &CommandArgs)>>>,
         ref_callbacks: HashMap<i32, RefCallbackFn>,
         ref_counts: HashMap<i32, i32>,
         pending_ref_result: Option<(i32, Vec<u8>)>,
@@ -1338,7 +1338,17 @@ fn resolve_export_ref(resource: &str, name: &str) -> String {
         result
 }
 
-pub fn on_command(command: &str, handler: impl Fn(i32, &[String]) + 'static, restricted: bool) {
+pub struct CommandArgs {
+        args: Vec<String>,
+        pub raw: String,
+}
+
+impl std::ops::Deref for CommandArgs {
+        type Target = [String];
+        fn deref(&self) -> &[String] { &self.args }
+}
+
+pub fn on_command(command: &str, handler: impl Fn(i32, &CommandArgs) + 'static, restricted: bool) {
         let cmd = command.to_string();
         let c = ctx();
         let handlers = unsafe { (*c).commands.entry(cmd.clone()).or_default() };
@@ -1348,14 +1358,13 @@ pub fn on_command(command: &str, handler: impl Fn(i32, &[String]) + 'static, res
         let (cb_ref, _) = create_canonical_ref(Rc::new(move |args_data: &[u8]| -> Vec<u8> {
                 let decoded = ensure_array(decode(args_data));
                 let source = if decoded.len() > 0 { decoded.at(0).as_int() } else { 0 };
-                let mut cmd_args = Vec::new();
-                if decoded.len() > 1 {
-                        if let Value::Array(arr) = decoded.at(1) {
-                                for v in arr { cmd_args.push(v.as_str().to_string()); }
-                        }
-                }
+                let args = match decoded.at(1) {
+                        Value::Array(arr) => arr.iter().map(|v| v.as_str().to_string()).collect(),
+                        _ => Vec::new(),
+                };
+                let cmd_args = CommandArgs { args, raw: decoded.at(2).as_str().to_string() };
                 let c = ctx();
-                let snapshot: Vec<Rc<dyn Fn(i32, &[String])>> = unsafe { (*c).commands.get(&cmd2) }
+                let snapshot: Vec<Rc<dyn Fn(i32, &CommandArgs)>> = unsafe { (*c).commands.get(&cmd2) }
                         .map(|v| v.iter().map(Rc::clone).collect())
                         .unwrap_or_default();
                 for h in snapshot { h(source, &cmd_args); }

@@ -1885,7 +1885,12 @@ bool decodeArgs(const EventArgs& args, std::tuple<Ts...>& out, ArgError& error)
 using EventHandler = std::function<void(int source, const EventArgs&)>;
 using TickHandler = std::function<void()>;
 using StopHandler = std::function<void()>;
-using CommandHandler = std::function<void(int source, const std::vector<std::string>& args)>;
+struct CommandArgs : std::vector<std::string>
+{
+        std::string raw;
+};
+
+using CommandHandler = std::function<void(int source, const CommandArgs& args)>;
 using ExportHandler = std::function<json::Value(const EventArgs&)>;
 using StateBagChangeHandler = std::function<void(const std::string& bagName, const std::string& key, const json::Value& value, int source, bool replicated)>;
 struct HttpResponse
@@ -3166,10 +3171,10 @@ inline void onCommand(const std::string& command, CommandHandler h, bool restric
                 auto decoded = fxw_internal::decode(args, argsSize);
                 fxw_internal::ensureArray(decoded);
                 int source = decoded.size() > 0 ? decoded.at(0).asInt() : 0;
-                std::vector<std::string> cmdArgs;
-                if (decoded.size() > 1 && decoded.at(1).kind == fxw_internal::Value::Kind::Array)
-                        for (size_t i = 0; i < decoded.at(1).size(); ++i)
-                                cmdArgs.push_back(decoded.at(1).at(i).asStr());
+                CommandArgs cmdArgs;
+                for (size_t i = 0; i < decoded.at(1).size(); ++i)
+                        cmdArgs.push_back(decoded.at(1).at(i).asStr());
+                cmdArgs.raw = decoded.at(2).asStr();
                 auto* ctx = fxw_internal::currentContext();
                 if (ctx)
                 {
