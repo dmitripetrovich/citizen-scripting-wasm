@@ -1,7 +1,9 @@
 use cfx::Server;
-use std::cell::{Cell, RefCell};
-use std::rc::Rc;
+use std::cell::Cell;
 use std::collections::HashMap;
+
+static PENDING: cfx::Global<HashMap<i32, String>> = cfx::Global::new(HashMap::new);
+static PLAYERS: cfx::Global<HashMap<i32, String>> = cfx::Global::new(HashMap::new);
 
 cfx::cfx_worker! {
         fn count_primes(input: &[u8], result: &mut [u8]) -> i32 {
@@ -17,35 +19,26 @@ cfx::cfx_worker! {
 Server! {
         println!("Instantiated instance of script {}.", cfx::get_current_resource_name());
 
-        let pending: Rc<RefCell<HashMap<i32, String>>> = Rc::new(RefCell::new(HashMap::new()));
-        let players: Rc<RefCell<HashMap<i32, String>>> = Rc::new(RefCell::new(HashMap::new()));
-
-        let players_stop = players.clone();
-        cfx::on_stop(move || {
-                println!("Resource stopping, {} players tracked.", players_stop.borrow().len());
+        cfx::on_stop(|| {
+                println!("Resource stopping, {} players tracked.", PLAYERS.borrow().len());
         });
 
-        let pending_connecting = pending.clone();
-        cfx::on("playerConnecting", move |source: i32, name: String| {
-                pending_connecting.borrow_mut().insert(source, name);
+        cfx::on("playerConnecting", |source: i32, name: String| {
+                PENDING.borrow_mut().insert(source, name);
         });
 
-        let pending_joining = pending.clone();
-        let players_joining = players.clone();
-        cfx::on("playerJoining", move |source: i32, old_id: String| {
-                let name = old_id.parse().ok().and_then(|id| pending_joining.borrow_mut().remove(&id)).unwrap_or_else(|| "Unknown".to_string());
-                players_joining.borrow_mut().insert(source, name.clone());
+        cfx::on("playerJoining", |source: i32, old_id: String| {
+                let name = old_id.parse().ok().and_then(|id| PENDING.borrow_mut().remove(&id)).unwrap_or_else(|| "Unknown".to_string());
+                PLAYERS.borrow_mut().insert(source, name.clone());
                 let license = cfx::natives::get_player_identifier_by_type(source, "license2");
-                let count = players_joining.borrow().len();
+                let count = PLAYERS.borrow().len();
                 println!("{} [{}] ({}) has connected. Players Online: {}", name, license, source, count);
         });
 
-        let players_dropped = players.clone();
-        cfx::on("playerDropped", move |source: i32, reason: String| {
-                let name = players_dropped.borrow().get(&source).cloned().unwrap_or_else(|| "Unknown".to_string());
+        cfx::on("playerDropped", |source: i32, reason: String| {
+                let name = PLAYERS.borrow_mut().remove(&source).unwrap_or_else(|| "Unknown".to_string());
                 let license = cfx::natives::get_player_identifier_by_type(source, "license2");
-                players_dropped.borrow_mut().remove(&source);
-                let count = players_dropped.borrow().len();
+                let count = PLAYERS.borrow().len();
                 println!("{} [{}] ({}) has disconnected ({}). Players Online: {}", name, license, source, reason, count);
         });
 
@@ -68,7 +61,7 @@ Server! {
                 println!("[cfx::set_timeout] 5 seconds since start.");
         });
 
-        let minutes = Rc::new(Cell::new(0));
+        let minutes = Cell::new(0);
         cfx::set_interval(60000, move || {
                 minutes.set(minutes.get() + 1);
                 println!("[cfx::set_interval] Up for {} minute(s).", minutes.get());

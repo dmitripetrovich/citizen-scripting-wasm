@@ -3,9 +3,12 @@
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <memory>
 #include <print>
 #include <unordered_map>
+
+static std::unordered_map<int, std::string> pending;
+static std::unordered_map<int, std::string> players;
+static int minutes = 0;
 
 CFX_WORKER(countPrimes)
 {
@@ -28,40 +31,37 @@ Server
 {
         std::println("Instantiated instance of script {}.", cfx::getCurrentResourceName());
 
-        auto pending = std::make_shared<std::unordered_map<int, std::string>>();
-        auto players = std::make_shared<std::unordered_map<int, std::string>>();
-
-        cfx::onStop([players]()
+        cfx::onStop([]()
         {
-                std::println("Resource stopping, {} players tracked.", players->size());
+                std::println("Resource stopping, {} players tracked.", players.size());
         });
 
-        cfx::on("playerConnecting", [pending](int source, std::string name)
+        cfx::on("playerConnecting", [](int source, std::string name)
         {
-                (*pending)[source] = name;
+                pending[source] = name;
         });
 
-        cfx::on("playerJoining", [pending, players](int source, std::string oldId)
+        cfx::on("playerJoining", [](int source, std::string oldId)
         {
-                auto it = pending->find(std::atoi(oldId.c_str()));
-                std::string name = (it != pending->end()) ? it->second : "Unknown";
-                if (it != pending->end())
-                        pending->erase(it);
-                (*players)[source] = name;
+                auto it = pending.find(std::atoi(oldId.c_str()));
+                std::string name = (it != pending.end()) ? it->second : "Unknown";
+                if (it != pending.end())
+                        pending.erase(it);
+                players[source] = name;
                 // typed wrapper from src/natives/all.h
                 std::string license = cfx::natives::GetPlayerIdentifierByType(source, "license2");
-                std::println("{} [{}] ({}) has connected. Players Online: {}", name, license, source, players->size());
+                std::println("{} [{}] ({}) has connected. Players Online: {}", name, license, source, players.size());
         });
 
-        cfx::on("playerDropped", [players](int source, std::string reason)
+        cfx::on("playerDropped", [](int source, std::string reason)
         {
-                std::string name = players->count(source) ? (*players)[source] : "Unknown";
+                std::string name = players.count(source) ? players[source] : "Unknown";
                 std::string license = cfx::natives::GetPlayerIdentifierByType(source, "license2");
-                players->erase(source);
-                std::println("{} [{}] ({}) has disconnected ({}). Players Online: {}", name, license, source, reason, players->size());
+                players.erase(source);
+                std::println("{} [{}] ({}) has disconnected ({}). Players Online: {}", name, license, source, reason, players.size());
         });
 
-        cfx::onNet("chatMessage", [players](int source, int author, std::string name, std::string message)
+        cfx::onNet("chatMessage", [](int source, int author, std::string name, std::string message)
         {
                 std::println("{} ({}) has sent a chat message: {}", name, author, message);
         });
@@ -85,10 +85,9 @@ Server
                 std::println("[cfx::setTimeout] 5 seconds since start.");
         });
 
-        auto minutes = std::make_shared<int>(0);
-        cfx::setInterval(60000, [minutes]()
+        cfx::setInterval(60000, []()
         {
-                std::println("[cfx::setInterval] Up for {} minute(s).", ++*minutes);
+                std::println("[cfx::setInterval] Up for {} minute(s).", ++minutes);
         });
 
         cfx::createThread([]() -> cfx::ScriptTask

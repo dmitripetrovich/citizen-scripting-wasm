@@ -15,6 +15,18 @@ impl<T> GlobalCell<T> {
         fn get(&self) -> *mut T { self.0.get() }
 }
 
+pub struct Global<T> {
+        init: fn() -> T,
+        cell: std::cell::OnceCell<std::cell::RefCell<T>>,
+}
+unsafe impl<T> Sync for Global<T> {}
+impl<T> Global<T> {
+        pub const fn new(init: fn() -> T) -> Self { Self { init, cell: std::cell::OnceCell::new() } }
+        fn cell(&self) -> &std::cell::RefCell<T> { self.cell.get_or_init(|| std::cell::RefCell::new((self.init)())) }
+        pub fn borrow(&self) -> std::cell::Ref<'_, T> { self.cell().borrow() }
+        pub fn borrow_mut(&self) -> std::cell::RefMut<'_, T> { self.cell().borrow_mut() }
+}
+
 static CTX: GlobalCell<Option<Context>> = GlobalCell::new(None);
 static CORO_WAIT_MS: GlobalCell<i64> = GlobalCell::new(0);
 
