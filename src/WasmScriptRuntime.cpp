@@ -2625,12 +2625,18 @@ static bool compileRust(const std::string& rsPath, const std::string& wasmPath, 
         std::string rlib = ensureRustRlib(sdkPath);
         if (rlib.empty())
                 return false;
-        size_t slash = wasmPath.rfind('/');
-        std::string outDir = slash == std::string::npos ? std::string(".") : wasmPath.substr(0, slash);
+        char tmpl[] = "/tmp/citizen-scripting-wasm-rustc-XXXXXX";
+        char* outDir = mkdtemp(tmpl);
+        if (!outDir)
+        {
+                LogError("Failed to create a temporary directory to compile '%s' in resource '%s': %s", rsPath.c_str(), resourceName.c_str(), strerror(errno));
+                return false;
+        }
         std::vector<std::string> args{ "rustc" };
         args.insert(args.end(), g_rustFlags.begin(), g_rustFlags.end());
         args.insert(args.end(), { "--extern", "cfx=" + rlib, rsPath, "--out-dir", outDir, "--emit=link=" + wasmPath + ",dep-info=" + wasmPath + ".d" });
         auto result = fx::spawnProgram(args, 1048576, 120000);
+        removeTree(outDir);
         std::string reason;
         if (processFailed(result, reason))
         {
