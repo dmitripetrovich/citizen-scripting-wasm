@@ -74,25 +74,14 @@ Server! {
                 println!("[cfx::set_interval] Up for {} minute(s).", minutes.get());
         });
 
-        let worker = cfx::create_worker("count_primes", b"100000");
-        if worker < 0 {
-                println!("[cfx::create_worker] Failed to start worker ({}).", worker);
-        } else {
-                let poll = Rc::new(Cell::new(0));
-                let poll_id = poll.clone();
-                poll.set(cfx::set_interval(100, move || {
-                        let result = cfx::poll_worker(worker, 64);
-                        if result.is_running() {
-                                return;
-                        }
-                        cfx::clear_interval(poll_id.get());
-                        if result.is_done() {
-                                println!("[cfx::create_worker] {} primes below 100000.", result.output_str());
-                        } else {
-                                println!("[cfx::create_worker] Worker failed ({}).", result.status);
-                        }
-                }));
-        }
+        cfx::create_thread(async {
+                let result = cfx::run_worker("count_primes", b"100000").await;
+                if result.is_done() {
+                        println!("[cfx::run_worker] {} primes below 100000.", result.output_str());
+                } else {
+                        println!("[cfx::run_worker] Worker failed ({}).", result.status);
+                }
+        });
 
         cfx::on_command("rust", |source, _args| {
                 if source == 0 {

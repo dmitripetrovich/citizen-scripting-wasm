@@ -3120,6 +3120,7 @@ struct WasmTask;
 struct WasmPromise
 {
         int64_t waitMs = 0;
+        std::function<bool()> readyCheck;
 #if __cpp_exceptions
         std::exception_ptr exception;
 #endif
@@ -3182,6 +3183,15 @@ inline std::chrono::steady_clock::time_point& earliestResume()
         return s_at;
 }
 
+inline void scheduleCoroutine(int32_t id, CoroutineEntry& entry, int64_t waitMs)
+{
+        auto now = std::chrono::steady_clock::now();
+        entry.resumeAt = (waitMs > 0) ? now + std::chrono::milliseconds(waitMs) : now;
+        earliestResume() = std::min(earliestResume(), entry.resumeAt);
+        int32_t deadline = waitMs <= 0 ? 0 : (waitMs > static_cast<int64_t>(INT32_MAX) ? INT32_MAX : static_cast<int32_t>(waitMs));
+        __cfxScheduleBookmark(id, deadline);
+}
+
 inline void resumeCoroutineById(int32_t id)
 {
         auto& coros = coroutines();
@@ -3189,6 +3199,12 @@ inline void resumeCoroutineById(int32_t id)
         if (it == coros.end())
                 return;
         auto handle = it->second.handle;
+        if (handle.promise().readyCheck && !handle.promise().readyCheck())
+        {
+                scheduleCoroutine(id, it->second, 0);
+                return;
+        }
+        handle.promise().readyCheck = nullptr;
         handle.promise().waitMs = 0;
 #if __cpp_exceptions
         handle.promise().exception = nullptr;
@@ -3210,14 +3226,7 @@ inline void resumeCoroutineById(int32_t id)
                 coros.erase(it);
         }
         else
-        {
-                int64_t waitMs = handle.promise().waitMs;
-                auto now = std::chrono::steady_clock::now();
-                it->second.resumeAt = (waitMs > 0) ? now + std::chrono::milliseconds(waitMs) : now;
-                earliestResume() = std::min(earliestResume(), it->second.resumeAt);
-                int32_t deadline = waitMs <= 0 ? 0 : (waitMs > static_cast<int64_t>(INT32_MAX) ? INT32_MAX : static_cast<int32_t>(waitMs));
-                __cfxScheduleBookmark(id, deadline);
-        }
+                scheduleCoroutine(id, it->second, handle.promise().waitMs);
 }
 
 inline void resumeCoroutineIfDue(int32_t id)
@@ -3430,6 +3439,49 @@ inline WorkerResult pollWorker(int32_t workerId, int32_t maxOutput = 4096)
                 buf.clear();
         result.output = std::move(buf);
         return result;
+}
+
+template<typename Result, Result (*Poll)(int32_t, int32_t)>
+struct PollAwaiter
+{
+        int32_t id;
+        Result result{ };
+
+        bool await_ready()
+        {
+                return poll();
+        }
+
+        void await_suspend(fxw_internal::WasmCoroutineHandle h)
+        {
+                h.promise().readyCheck = [this] { return poll(); };
+        }
+
+        Result await_resume()
+        {
+                return std::move(result);
+        }
+
+        bool poll()
+        {
+                if (id < 0)
+                {
+                        result.status = id == -3 ? -1 : id;
+                        return true;
+                }
+                result = Poll(id, 4096);
+                return !result.isRunning();
+        }
+};
+
+inline PollAwaiter<WorkerResult, pollWorker> runWorker(const std::string& fnName, const std::string& input = "")
+{
+        return { createWorker(fnName, input) };
+}
+
+inline PollAwaiter<ProcessResult, pollProcess> runProcess(const std::string& command)
+{
+        return { spawnProcess(command) };
 }
 
 }

@@ -91,24 +91,14 @@ Server
                 std::println("[cfx::setInterval] Up for {} minute(s).", ++*minutes);
         });
 
-        int32_t worker = cfx::createWorker("countPrimes", "100000");
-        if (worker < 0)
-                std::println("[cfx::createWorker] Failed to start worker ({}).", worker);
-        else
+        cfx::createThread([]() -> cfx::ScriptTask
         {
-                auto poll = std::make_shared<int32_t>(0);
-                *poll = cfx::setInterval(100, [worker, poll]()
-                {
-                        cfx::WorkerResult result = cfx::pollWorker(worker);
-                        if (result.isRunning())
-                                return;
-                        cfx::clearInterval(*poll);
-                        if (result.isDone())
-                                std::println("[cfx::createWorker] {} primes below 100000.", result.output);
-                        else
-                                std::println("[cfx::createWorker] Worker failed ({}).", result.status);
-                });
-        }
+                cfx::WorkerResult result = co_await cfx::runWorker("countPrimes", "100000");
+                if (result.isDone())
+                        std::println("[cfx::runWorker] {} primes below 100000.", result.output);
+                else
+                        std::println("[cfx::runWorker] Worker failed ({}).", result.status);
+        });
 
         cfx::onCommand("c++", [](int source, const std::vector<std::string>&)
         {

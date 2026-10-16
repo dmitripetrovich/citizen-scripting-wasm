@@ -1397,6 +1397,24 @@ pub fn poll_worker(worker_id: i32, max_output: usize) -> WorkerResult {
         WorkerResult { status: raw, output: buf }
 }
 
+pub fn run_worker(fn_name: &str, input: &[u8]) -> impl Future<Output = WorkerResult> {
+        let id = create_worker(fn_name, input);
+        core::future::poll_fn(move |_| {
+                if id < 0 { return Poll::Ready(WorkerResult { status: if id == -3 { -1 } else { id }, output: Vec::new() }); }
+                let result = poll_worker(id, 4096);
+                if result.is_running() { Poll::Pending } else { Poll::Ready(result) }
+        })
+}
+
+pub fn run_process(command: &str) -> impl Future<Output = ProcessResult> {
+        let id = spawn_process(command);
+        core::future::poll_fn(move |_| {
+                if id < 0 { return Poll::Ready(ProcessResult { status: if id == -3 { -1 } else { id }, exit_code: 0, output: String::new(), ok: false, truncated: false }); }
+                let result = poll_process(id, 4096);
+                if result.is_running() { Poll::Pending } else { Poll::Ready(result) }
+        })
+}
+
 pub fn wait(ms: u64) -> impl Future<Output = ()> {
         struct WaitFuture(bool, u64);
         impl Future for WaitFuture {
