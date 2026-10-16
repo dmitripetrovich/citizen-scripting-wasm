@@ -476,7 +476,7 @@ impl FromEventArg for f32 { fn from_event_arg(args: &EventArgs, i: usize) -> Sel
 impl FromEventArg for bool { fn from_event_arg(args: &EventArgs, i: usize) -> Self { args.bool(i) } }
 impl FromEventArg for Value { fn from_event_arg(args: &EventArgs, i: usize) -> Self { args.value(i).clone() } }
 
-type EventHandlerFn = Rc<dyn Fn(&str, &EventArgs)>;
+type EventHandlerFn = Rc<dyn Fn(i32, &EventArgs)>;
 
 pub struct RawEventHandler;
 
@@ -484,7 +484,7 @@ pub trait IntoEventHandler<M> {
         fn into_event_handler(self, event: &str) -> EventHandlerFn;
 }
 
-impl<F: Fn(&str, &EventArgs) + 'static> IntoEventHandler<RawEventHandler> for F {
+impl<F: Fn(i32, &EventArgs) + 'static> IntoEventHandler<RawEventHandler> for F {
         fn into_event_handler(self, _event: &str) -> EventHandlerFn { Rc::new(self) }
 }
 
@@ -494,10 +494,10 @@ fn report_arg_error(event: &str, error: ArgError) {
 
 macro_rules! impl_typed_event_handler {
         ($($t:ident $i:tt),*) => {
-                impl<F, $($t: FromArg),*> IntoEventHandler<($($t,)*)> for F where F: Fn(&str $(, $t)*) + 'static {
+                impl<F, $($t: FromArg),*> IntoEventHandler<($($t,)*)> for F where F: Fn(i32 $(, $t)*) + 'static {
                         fn into_event_handler(self, event: &str) -> EventHandlerFn {
                                 let event = event.to_string();
-                                Rc::new(move |source: &str, _args: &EventArgs| {
+                                Rc::new(move |source: i32, _args: &EventArgs| {
                                         let decoded = (|| -> Result<($($t,)*), ArgError> { Ok(($(decode_arg::<$t>(_args, $i)?,)*)) })();
                                         match decoded {
                                                 Ok(_values) => self(source $(, _values.$i)*),
@@ -556,7 +556,7 @@ struct Context {
         coroutines: HashMap<i32, CoroutineEntry>,
         next_coroutine_id: i32,
         earliest_resume: u64,
-        commands: HashMap<String, Vec<Rc<dyn Fn(&str, &[String])>>>,
+        commands: HashMap<String, Vec<Rc<dyn Fn(i32, &[String])>>>,
         ref_callbacks: HashMap<i32, RefCallbackFn>,
         ref_counts: HashMap<i32, i32>,
         pending_ref_result: Option<(i32, Vec<u8>)>,
@@ -977,13 +977,13 @@ pub fn get_resources() -> Vec<String> {
 }
 
 pub fn on_resource_start(handler: impl Fn(&str) + 'static) -> i32 {
-        on("onResourceStart", move |_source: &str, args: &EventArgs| {
+        on("onResourceStart", move |_source: i32, args: &EventArgs| {
                 if args.len() > 0 { handler(args.str(0)); }
         })
 }
 
 pub fn on_resource_stop(handler: impl Fn(&str) + 'static) -> i32 {
-        on("onResourceStop", move |_source: &str, args: &EventArgs| {
+        on("onResourceStop", move |_source: i32, args: &EventArgs| {
                 if args.len() > 0 { handler(args.str(0)); }
         })
 }
@@ -1004,7 +1004,7 @@ pub fn add_export(name: &str, handler: impl Fn(&EventArgs) -> Value + 'static) {
         let res_name = get_current_resource_name();
         let event_name = format!("__cfx_export_{}_{}", res_name, name);
         let export_ref_clone = export_ref.clone();
-        on(&event_name, move |_source: &str, args: &EventArgs| {
+        on(&event_name, move |_source: i32, args: &EventArgs| {
                 if args.len() == 0 { return; }
                 let setter_ref = args.func_ref(0);
                 if setter_ref.is_empty() { return; }
@@ -1104,7 +1104,7 @@ fn resolve_export_ref(resource: &str, name: &str) -> String {
         result
 }
 
-pub fn on_command(command: &str, handler: impl Fn(&str, &[String]) + 'static, restricted: bool) {
+pub fn on_command(command: &str, handler: impl Fn(i32, &[String]) + 'static, restricted: bool) {
         let cmd = command.to_string();
         let c = ctx();
         let handlers = unsafe { (*c).commands.entry(cmd.clone()).or_default() };
@@ -1113,7 +1113,7 @@ pub fn on_command(command: &str, handler: impl Fn(&str, &[String]) + 'static, re
         let cmd2 = cmd.clone();
         let (cb_ref, _) = create_canonical_ref(Rc::new(move |args_data: &[u8]| -> Vec<u8> {
                 let decoded = ensure_array(decode(args_data));
-                let source = if decoded.len() > 0 { decoded.at(0).as_int().to_string() } else { "0".to_string() };
+                let source = if decoded.len() > 0 { decoded.at(0).as_int() } else { 0 };
                 let mut cmd_args = Vec::new();
                 if decoded.len() > 1 {
                         if let Value::Array(arr) = decoded.at(1) {
@@ -1121,10 +1121,10 @@ pub fn on_command(command: &str, handler: impl Fn(&str, &[String]) + 'static, re
                         }
                 }
                 let c = ctx();
-                let snapshot: Vec<Rc<dyn Fn(&str, &[String])>> = unsafe { (*c).commands.get(&cmd2) }
+                let snapshot: Vec<Rc<dyn Fn(i32, &[String])>> = unsafe { (*c).commands.get(&cmd2) }
                         .map(|v| v.iter().map(Rc::clone).collect())
                         .unwrap_or_default();
-                for h in snapshot { h(&source, &cmd_args); }
+                for h in snapshot { h(source, &cmd_args); }
                 vec![0x90]
         }));
         if cb_ref.is_empty() { return; }
@@ -1439,7 +1439,7 @@ pub fn perform_http_request(url: &str, method: &str, data: &str, headers: &[(&st
         unsafe { (*c).http_callbacks.insert(token, Box::new(callback)) };
         if !unsafe { (*c).http_response_registered } {
                 unsafe { (*c).http_response_registered = true };
-                on("__cfx_internal:httpResponse", |_source: &str, args: &EventArgs| {
+                on("__cfx_internal:httpResponse", |_source: i32, args: &EventArgs| {
                         if args.len() < 4 { return; }
                         let tok = args.int(0);
                         let c = ctx();
@@ -1883,7 +1883,7 @@ pub mod runtime {
                                 unsafe { (*c).resource_name = String::from_utf8(buf).unwrap_or_default() };
                         }
                 }
-                on("onServerResourceStop", |_source: &str, args: &EventArgs| {
+                on("onServerResourceStop", |_source: i32, args: &EventArgs| {
                         if args.len() == 0 { return; }
                         let resource = args.str(0);
                         let prefix = format!("{}/", resource);
@@ -1937,6 +1937,10 @@ pub mod runtime {
                 }
         }
 
+        fn parse_source(src: &str) -> i32 {
+                src.strip_prefix("net:").or_else(|| src.strip_prefix("internal-net:")).and_then(|id| id.parse().ok()).unwrap_or(0)
+        }
+
         pub fn on_event(name: *const u8, name_len: u32, args: *const u8, args_len: u32, src: *const u8, src_len: u32) {
                 let name_bytes = unsafe { std::slice::from_raw_parts(name, name_len as usize) };
                 let key = match std::str::from_utf8(name_bytes) { Ok(s) => s, Err(_) => return };
@@ -1958,8 +1962,9 @@ pub mod runtime {
                         .map(|v| v.iter().map(|e| Rc::clone(&e.handler)).collect())
                         .unwrap_or_default();
 
+                let source = parse_source(src_str);
                 for h in handlers {
-                        h(src_str, &ea);
+                        h(source, &ea);
                 }
         }
 

@@ -147,7 +147,6 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
                 WasmScriptRuntime* rt = nullptr;
         };
         std::shared_ptr<RefGuard> m_refGuard = std::make_shared<RefGuard>();
-        bool m_eventCanceled = false;
 
     private:
         fx::OMPtr<IScriptHost> m_host;

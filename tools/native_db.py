@@ -195,7 +195,13 @@ def generate_wrapper(native: dict) -> str | None:
         else:
                 body = f"return invoke<{invoke_ret}>({hash_str}{comma_args});"
 
-        return f"        inline {cpp_ret} {func_name}({param_str})\n        {{\n                {body}\n        }}"
+        wrapper = f"        inline {cpp_ret} {func_name}({param_str})\n        {{\n                {body}\n        }}"
+        if not any(p.get("type") == "char*" and p.get("name") == "playerSrc" for p in params):
+                return wrapper
+        int_params = ", ".join("int playerSrc" if param == "const char* playerSrc" else param for param in cpp_params)
+        forward_args = ", ".join("std::to_string(playerSrc).c_str()" if arg == "playerSrc" else arg for arg in call_args)
+        ret = "" if invoke_ret is None else "return "
+        return f"{wrapper}\n\n        inline {cpp_ret} {func_name}({int_params})\n        {{\n                {ret}{func_name}({forward_args});\n        }}"
 
 
 def generate_namespace_block(namespace: str, natives: list[dict]) -> tuple[str, str, int] | None:
@@ -311,11 +317,13 @@ def generate_rust_wrapper(native: dict) -> str | None:
                         skip = True
                         break
                 rtype, kind, expr_template = RUST_PARAM_TYPE_MAP[ptype]
-                rust_params.append(f"{pname}: {rtype}")
+                player = ptype == "char*" and p.get("name") == "playerSrc"
+                rust_params.append(f"{pname}: impl ::std::fmt::Display" if player else f"{pname}: {rtype}")
                 if kind == "str":
                         var = f"_s{str_idx}"
                         str_idx += 1
-                        cstring_decls.append(f"                let {var} = ::std::ffi::CString::new({pname}).unwrap_or_default();")
+                        value = f"{pname}.to_string()" if player else pname
+                        cstring_decls.append(f"                let {var} = ::std::ffi::CString::new({value}).unwrap_or_default();")
                         arg_exprs.append(f"crate::NativeArg::ptr({var}.as_ptr() as u64)")
                 elif kind == "ptr":
                         arg_exprs.append(f"crate::NativeArg::ptr({expr_template.format(p=pname)})")

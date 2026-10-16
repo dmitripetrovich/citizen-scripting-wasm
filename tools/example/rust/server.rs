@@ -3,10 +3,6 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::collections::HashMap;
 
-fn extract_id(source: &str) -> &str {
-        source.split(':').nth(1).unwrap_or(source)
-}
-
 cfx::cfx_worker! {
         fn count_primes(input: &[u8], result: &mut [u8]) -> i32 {
                 let limit: u32 = std::str::from_utf8(input).ok().and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -21,8 +17,8 @@ cfx::cfx_worker! {
 Server! {
         cfx::trace!("Instantiated instance of script {}.\n", cfx::get_current_resource_name());
 
-        let pending: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
-        let players: Rc<RefCell<HashMap<String, String>>> = Rc::new(RefCell::new(HashMap::new()));
+        let pending: Rc<RefCell<HashMap<i32, String>>> = Rc::new(RefCell::new(HashMap::new()));
+        let players: Rc<RefCell<HashMap<i32, String>>> = Rc::new(RefCell::new(HashMap::new()));
 
         let players_stop = players.clone();
         cfx::on_stop(move || {
@@ -30,33 +26,30 @@ Server! {
         });
 
         let pending_connecting = pending.clone();
-        cfx::on("playerConnecting", move |source: &str, name: String| {
-                let id = extract_id(source).to_string();
-                pending_connecting.borrow_mut().insert(id, name);
+        cfx::on("playerConnecting", move |source: i32, name: String| {
+                pending_connecting.borrow_mut().insert(source, name);
         });
 
         let pending_joining = pending.clone();
         let players_joining = players.clone();
-        cfx::on("playerJoining", move |source: &str, old_id: String| {
-                let name = pending_joining.borrow_mut().remove(&old_id).unwrap_or_else(|| "Unknown".to_string());
-                let id = extract_id(source).to_string();
-                players_joining.borrow_mut().insert(id.clone(), name.clone());
-                let license = cfx::natives::cfx::get_player_identifier_by_type(&id, "license2");
+        cfx::on("playerJoining", move |source: i32, old_id: String| {
+                let name = old_id.parse().ok().and_then(|id| pending_joining.borrow_mut().remove(&id)).unwrap_or_else(|| "Unknown".to_string());
+                players_joining.borrow_mut().insert(source, name.clone());
+                let license = cfx::natives::cfx::get_player_identifier_by_type(source, "license2");
                 let count = players_joining.borrow().len();
-                cfx::trace!("{} [{}] ({}) has connected. Players Online: {}\n", name, license, id, count);
+                cfx::trace!("{} [{}] ({}) has connected. Players Online: {}\n", name, license, source, count);
         });
 
         let players_dropped = players.clone();
-        cfx::on("playerDropped", move |source: &str, reason: String| {
-                let id = extract_id(source).to_string();
-                let name = players_dropped.borrow().get(&id).cloned().unwrap_or_else(|| "Unknown".to_string());
-                let license = cfx::natives::cfx::get_player_identifier_by_type(&id, "license2");
-                players_dropped.borrow_mut().remove(&id);
+        cfx::on("playerDropped", move |source: i32, reason: String| {
+                let name = players_dropped.borrow().get(&source).cloned().unwrap_or_else(|| "Unknown".to_string());
+                let license = cfx::natives::cfx::get_player_identifier_by_type(source, "license2");
+                players_dropped.borrow_mut().remove(&source);
                 let count = players_dropped.borrow().len();
-                cfx::trace!("{} [{}] ({}) has disconnected ({}). Players Online: {}\n", name, license, id, reason, count);
+                cfx::trace!("{} [{}] ({}) has disconnected ({}). Players Online: {}\n", name, license, source, reason, count);
         });
 
-        cfx::on_net("chatMessage", |_source: &str, author: i32, name: String, message: String| {
+        cfx::on_net("chatMessage", |_source: i32, author: i32, name: String, message: String| {
                 cfx::trace!("{} ({}) has sent a chat message: {}\n", name, author, message);
         });
 
@@ -105,13 +98,12 @@ Server! {
         }
 
         cfx::on_command("rust", |source, _args| {
-                if source.is_empty() || source == "0" {
+                if source == 0 {
                         return;
                 }
-                let src: i32 = source.parse().unwrap_or(0);
                 let name = cfx::get_current_resource_name();
-                let info = cfx::call_export(&name, "getPlayerInfo", &[cfx::Value::from(src)]);
+                let info = cfx::call_export(&name, "getPlayerInfo", &[cfx::Value::from(source)]);
                 cfx::trace!("[cfx::add_export] {}\n", info.as_str());
-                cfx::call_export("fw", "SendChatMessage", &[cfx::Value::from(src), cfx::Value::from("^#f0a0e4[INFO] ^#ffffffHello from ^#b7410eRust^#ffffff!")]);
+                cfx::call_export("fw", "SendChatMessage", &[cfx::Value::from(source), cfx::Value::from("^#f0a0e4[INFO] ^#ffffffHello from ^#b7410eRust^#ffffff!")]);
         }, false);
 }

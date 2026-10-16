@@ -736,7 +736,6 @@ static wasm_trap_t* CbEmitNetEvent(void* env, wasmtime_caller_t* caller, const w
 static wasm_trap_t* CbCancelEvent(void* env, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t*, size_t)
 {
         auto* rt = static_cast<WasmModule*>(env)->rt;
-        rt->m_eventCanceled = true;
         if (rt->host())
         {
                 fxNativeContext nctx{ };
@@ -750,7 +749,12 @@ static wasm_trap_t* CbCancelEvent(void* env, wasmtime_caller_t*, const wasmtime_
 
 static wasm_trap_t* CbWasEventCanceled(void* env, wasmtime_caller_t*, const wasmtime_val_t*, size_t, wasmtime_val_t* results, size_t)
 {
-        results[0] = I32Val(static_cast<WasmModule*>(env)->rt->m_eventCanceled ? 1 : 0);
+        auto* rt = static_cast<WasmModule*>(env)->rt;
+        fxNativeContext nctx{ };
+        nctx.nativeIdentifier = HashString("WAS_EVENT_CANCELED");
+        nctx.numResults = 1;
+        bool canceled = rt->host() && FX_SUCCEEDED(rt->host()->InvokeNative(nctx)) && (nctx.arguments[0] & 0xFF) != 0;
+        results[0] = I32Val(canceled ? 1 : 0);
         return nullptr;
 }
 
@@ -2130,8 +2134,6 @@ void WasmScriptRuntime::dispatchEvent(const std::vector<std::shared_ptr<WasmModu
         uint32_t nameAllocSz = static_cast<uint32_t>(nameAllocSz64);
         uint32_t argsAllocSz = static_cast<uint32_t>(argsAllocSz64);
         uint32_t totalSz = static_cast<uint32_t>(totalSz64);
-        bool outerCanceled = m_eventCanceled;
-        m_eventCanceled = false;
         auto modules = targets;
         for (auto& mod : modules)
         {
@@ -2161,7 +2163,6 @@ void WasmScriptRuntime::dispatchEvent(const std::vector<std::shared_ptr<WasmModu
                         ScriptPrint(m_host.GetRef(), m_resourceName, "^1SCRIPT ERROR: @" + m_resourceName + "/" + mod->scriptFile + ": WASM trap in event '" + std::string(name) + "'^7");
                 mod->wasmFree(block, totalSz);
         }
-        m_eventCanceled = outerCanceled;
 }
 
 result_t OM_DECL WasmScriptRuntime::CallRef(int32_t refIdx, char* argsSerialized, uint32_t argsSize, IScriptBuffer** retval)

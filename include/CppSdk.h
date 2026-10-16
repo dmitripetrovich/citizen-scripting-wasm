@@ -1790,10 +1790,10 @@ bool decodeArgs(const EventArgs& args, std::tuple<Ts...>& out, ArgError& error)
         }(std::index_sequence_for<Ts...>{ });
 }
 
-using EventHandler = std::function<void(const std::string& source, const EventArgs&)>;
+using EventHandler = std::function<void(int source, const EventArgs&)>;
 using TickHandler = std::function<void()>;
 using StopHandler = std::function<void()>;
-using CommandHandler = std::function<void(const std::string& source, const std::vector<std::string>& args)>;
+using CommandHandler = std::function<void(int source, const std::vector<std::string>& args)>;
 using ExportHandler = std::function<json::Value(const EventArgs&)>;
 using StateBagChangeHandler = std::function<void(const std::string& bagName, const std::string& key, const json::Value& value, int source, bool replicated)>;
 using HttpCallback = std::function<void(int statusCode, const std::string& body, const std::string& headers)>;
@@ -1870,6 +1870,20 @@ inline void safeInvoke(F&& fn, const char* resourceName, const char* context)
         (void)context;
         fn();
 #endif
+}
+
+inline int parseSource(std::string_view src)
+{
+        for (std::string_view prefix : { std::string_view("net:"), std::string_view("internal-net:") })
+        {
+                if (!src.starts_with(prefix))
+                        continue;
+                std::string_view digits = src.substr(prefix.size());
+                int id = 0;
+                auto [ptr, ec] = std::from_chars(digits.data(), digits.data() + digits.size(), id);
+                return ec == std::errc() && ptr == digits.data() + digits.size() ? id : 0;
+        }
+        return 0;
 }
 
 struct EventHandlerEntry
@@ -1981,8 +1995,9 @@ struct Context
                         snapshot.push_back(e.handler);
                 char eventCtx[256];
                 snprintf(eventCtx, sizeof(eventCtx), "event '%s'", key.c_str());
+                int source = parseSource(srcStr);
                 for (auto& h : snapshot)
-                        safeInvoke([&] { h(srcStr, ea); }, resourceName.c_str(), eventCtx);
+                        safeInvoke([&] { h(source, ea); }, resourceName.c_str(), eventCtx);
         }
 };
 
@@ -2132,7 +2147,7 @@ struct fn_traits<R (*)(Args...) noexcept>
 };
 
 template<typename F, typename ArgsTuple, size_t... Is>
-void InvokeTypedHandler(F& fn, const std::string& event, const std::string& source, const EventArgs& args, std::index_sequence<Is...>)
+void InvokeTypedHandler(F& fn, const std::string& event, int source, const EventArgs& args, std::index_sequence<Is...>)
 {
         std::tuple<std::decay_t<std::tuple_element_t<Is + 1, ArgsTuple>>...> values;
         ArgError error;
@@ -2150,7 +2165,7 @@ EventHandler WrapTypedHandler(const std::string& event, F&& fn)
         using args_tuple = typename fn_traits<std::decay_t<F>>::tuple_type;
         constexpr size_t n = std::tuple_size_v<args_tuple>;
         static_assert(n >= 1, "Handler must accept at least source parameter");
-        return [event, f = std::forward<F>(fn)](const std::string& source, const EventArgs& args) mutable
+        return [event, f = std::forward<F>(fn)](int source, const EventArgs& args) mutable
         {
                 InvokeTypedHandler<decltype(f), args_tuple>(f, event, source, args, std::make_index_sequence<n - 1>{ });
         };
@@ -2441,7 +2456,7 @@ inline bool wasEventCanceled()
 template<typename F>
 inline int32_t onResourceStart(F&& handler)
 {
-        return on("onResourceStart", [h = std::forward<F>(handler)](const std::string&, const EventArgs& args)
+        return on("onResourceStart", [h = std::forward<F>(handler)](int, const EventArgs& args)
         {
                 if (args.size() > 0)
                         h(args.str(0));
@@ -2451,7 +2466,7 @@ inline int32_t onResourceStart(F&& handler)
 template<typename F>
 inline int32_t onResourceStop(F&& handler)
 {
-        return on("onResourceStop", [h = std::forward<F>(handler)](const std::string&, const EventArgs& args)
+        return on("onResourceStop", [h = std::forward<F>(handler)](int, const EventArgs& args)
         {
                 if (args.size() > 0)
                         h(args.str(0));
@@ -2768,7 +2783,7 @@ inline void addExport(const std::string& name, ExportHandler handler)
                 return;
         std::string resName = getCurrentResourceName();
         std::string eventName = "__cfx_export_" + resName + "_" + name;
-        on(eventName, [exportRef](const std::string&, const EventArgs& args)
+        on(eventName, [exportRef](int, const EventArgs& args)
         {
                 if (args.size() == 0)
                         return;
@@ -2909,7 +2924,7 @@ inline void onCommand(const std::string& command, CommandHandler h, bool restric
         {
                 auto decoded = fxw_internal::decode(args, argsSize);
                 fxw_internal::ensureArray(decoded);
-                std::string source = decoded.size() > 0 ? std::to_string(decoded.at(0).asInt()) : "0";
+                int source = decoded.size() > 0 ? decoded.at(0).asInt() : 0;
                 std::vector<std::string> cmdArgs;
                 if (decoded.size() > 1 && decoded.at(1).kind == fxw_internal::Value::Kind::Array)
                         for (size_t i = 0; i < decoded.at(1).size(); ++i)
@@ -2959,7 +2974,7 @@ inline void performHttpRequest(const std::string& url, HttpCallback cb, const st
         if (!c->httpResponseRegistered)
         {
                 c->httpResponseRegistered = true;
-                on("__cfx_internal:httpResponse", [](const std::string&, const EventArgs& args)
+                on("__cfx_internal:httpResponse", [](int, const EventArgs& args)
                 {
                         auto* ctx = fxw_internal::currentContext();
                         if (!ctx || args.size() < 4)
@@ -3516,7 +3531,7 @@ void __cfx_init()
                         __cfxGetResourceMetadata(k, sizeof(k) - 1, 0, s_ctx.resourceName.data(), len + 1);
                 }
         }
-        cfx::on("onServerResourceStop", [](const std::string&, std::string resource)
+        cfx::on("onServerResourceStop", [](int, std::string resource)
         {
                 std::string prefix = resource + '/';
                 auto& cache = cfx::detail::exportRefCache();
