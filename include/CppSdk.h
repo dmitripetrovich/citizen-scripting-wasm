@@ -884,10 +884,22 @@ inline std::vector<uint8_t> encode(const Value& v)
 }
 
 template<typename T>
+inline constexpr bool unsupportedArg = false;
+
+template<typename T>
 inline void encodeOne(Writer& w, T&& v)
 {
         using D = std::decay_t<T>;
-        if constexpr (std::is_same_v<D, std::string> || std::is_same_v<D, std::string_view> || std::is_same_v<D, const char*> || std::is_same_v<D, char*>)
+        if constexpr (std::is_same_v<D, std::nullptr_t> || std::is_same_v<D, std::nullopt_t>)
+                w.encNull();
+        else if constexpr (std::is_same_v<D, const char*> || std::is_same_v<D, char*>)
+        {
+                if (v)
+                        w.str(std::string_view(v));
+                else
+                        w.encNull();
+        }
+        else if constexpr (std::is_same_v<D, std::string> || std::is_same_v<D, std::string_view>)
                 w.str(std::string_view(v));
         else if constexpr (std::is_same_v<D, bool>)
                 w.encBool(v);
@@ -908,8 +920,38 @@ inline void encodeOne(Writer& w, T&& v)
         }
         else if constexpr (std::is_integral_v<D>)
                 w.encInt((int64_t)v);
+        else if constexpr (std::is_enum_v<D>)
+                encodeOne(w, static_cast<std::underlying_type_t<D>>(v));
+        else if constexpr (requires { typename D::value_type; v.has_value(); *v; })
+        {
+                if (v)
+                        encodeOne(w, *v);
+                else
+                        w.encNull();
+        }
+        else if constexpr (requires { typename D::key_type; typename D::mapped_type; v.begin(); v.size(); })
+        {
+                static_assert(std::is_convertible_v<const typename D::key_type&, std::string_view>, "cfx: map keys must be strings");
+                w.mapHeader(static_cast<uint32_t>(v.size()));
+                for (const auto& [key, item] : v)
+                {
+                        w.str(std::string_view(key));
+                        encodeOne(w, item);
+                }
+        }
+        else if constexpr (requires { v.begin(); v.end(); v.size(); })
+        {
+                w.arrayHeader(static_cast<uint32_t>(v.size()));
+                for (const auto& item : v)
+                {
+                        if constexpr (std::is_same_v<typename D::value_type, bool>)
+                                w.encBool(static_cast<bool>(item));
+                        else
+                                encodeOne(w, item);
+                }
+        }
         else
-                w.encNull();
+                static_assert(unsupportedArg<D>, "cfx: unsupported argument type, pass a number, bool, string, enum, std::optional, a container of those, or cfx::json::Value");
 }
 
 template<typename... TArgs>
