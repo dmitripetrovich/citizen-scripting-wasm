@@ -225,6 +225,8 @@ impl From<u8> for Value { fn from(v: u8) -> Self { Value::Int(v as i64) } }
 impl From<u16> for Value { fn from(v: u16) -> Self { Value::Int(v as i64) } }
 impl From<u32> for Value { fn from(v: u32) -> Self { Value::Int(v as i64) } }
 impl From<u64> for Value { fn from(v: u64) -> Self { if v > i64::MAX as u64 { Value::Float(v as f64) } else { Value::Int(v as i64) } } }
+impl From<usize> for Value { fn from(v: usize) -> Self { Value::from(v as u64) } }
+impl From<isize> for Value { fn from(v: isize) -> Self { Value::Int(v as i64) } }
 impl From<Vec<Value>> for Value { fn from(v: Vec<Value>) -> Self { Value::Array(v) } }
 impl From<f64> for Value { fn from(v: f64) -> Self { Value::Float(v) } }
 impl From<f32> for Value { fn from(v: f32) -> Self { Value::Float(v as f64) } }

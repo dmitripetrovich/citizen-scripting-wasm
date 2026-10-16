@@ -357,8 +357,8 @@ struct Value
                 return *this;
         }
 
-        Value(int v) : kind(Kind::Number), isIntegral(true), intVal(v), numVal(static_cast<double>(v)) { }
-        Value(int64_t v) : kind(Kind::Number), isIntegral(true), intVal(v), numVal(static_cast<double>(v)) { }
+        template<typename T, std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>, int> = 0>
+        Value(T v) : kind(Kind::Number), isIntegral(!std::is_unsigned_v<T> || static_cast<uint64_t>(v) <= static_cast<uint64_t>(INT64_MAX)), intVal(static_cast<int64_t>(v)), numVal(static_cast<double>(v)) { }
         Value(double v) : kind(Kind::Number), numVal(v) { }
         Value(float v) : kind(Kind::Number), numVal(static_cast<double>(v)) { }
         Value(bool b) : kind(Kind::Bool), boolVal(b) { }
