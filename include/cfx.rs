@@ -2041,6 +2041,18 @@ pub fn native_void(name: &str, args: &[NativeArg]) {
         invoke_native_void(hash_string(name.as_bytes()), args);
 }
 
+pub fn get_players() -> Vec<i32> {
+        (0..native_int("GET_NUM_PLAYER_INDICES", &[]))
+                .filter_map(|i| native_string("GET_PLAYER_FROM_INDEX", &[NativeArg::val(i as u32 as u64)]).parse().ok())
+                .collect()
+}
+
+pub fn get_player_identifiers(source: i32) -> Vec<String> {
+        let player = CString::new(source.to_string()).unwrap_or_default();
+        let count = native_int("GET_NUM_PLAYER_IDENTIFIERS", &[NativeArg::ptr(player.as_ptr() as u64)]);
+        (0..count).map(|i| native_string("GET_PLAYER_IDENTIFIER", &[NativeArg::ptr(player.as_ptr() as u64), NativeArg::val(i as u32 as u64)])).collect()
+}
+
 pub fn native_int(name: &str, args: &[NativeArg]) -> i32 {
         invoke_native_int(hash_string(name.as_bytes()), args)
 }

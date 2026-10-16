@@ -2530,6 +2530,30 @@ inline TResult native(const char* name, TArgs&&... args)
         return cfx::natives::invoke<TResult>(HashString(name), std::forward<TArgs>(args)...);
 }
 
+inline std::vector<int> getPlayers()
+{
+        std::vector<int> players;
+        int count = native<int>("GET_NUM_PLAYER_INDICES");
+        for (int i = 0; i < count; ++i)
+        {
+                std::string id = native<std::string>("GET_PLAYER_FROM_INDEX", i);
+                int player = 0;
+                if (std::from_chars(id.data(), id.data() + id.size(), player).ec == std::errc())
+                        players.push_back(player);
+        }
+        return players;
+}
+
+inline std::vector<std::string> getPlayerIdentifiers(int source)
+{
+        std::string player = std::to_string(source);
+        std::vector<std::string> identifiers;
+        int count = native<int>("GET_NUM_PLAYER_IDENTIFIERS", player.c_str());
+        for (int i = 0; i < count; ++i)
+                identifiers.push_back(native<std::string>("GET_PLAYER_IDENTIFIER", player.c_str(), i));
+        return identifiers;
+}
+
 inline std::string lastNativeError()
 {
         int32_t len = __cfxGetLastNativeError(nullptr, 0);
