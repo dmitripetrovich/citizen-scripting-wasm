@@ -548,6 +548,74 @@ impl_typed_export_handler!(A 0, B 1, C 2, D 3, E 4, F5 5);
 impl_typed_export_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6);
 impl_typed_export_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6, H 7);
 
+pub struct AsyncExportHandler;
+
+macro_rules! impl_async_export_handler {
+        ($($t:ident $i:tt),*) => {
+                impl<F, Fut, $($t: FromArg),*> IntoExportHandler<(AsyncExportHandler, Fut, $($t,)*)> for F
+                where F: Fn($($t),*) -> Fut + 'static, Fut: Future + 'static, Fut::Output: Into<Value> {
+                        fn into_export_handler(self, name: &str) -> ExportHandlerFn {
+                                let name = name.to_string();
+                                Rc::new(move |_args: &EventArgs| -> Value {
+                                        let decoded = (|| -> Result<($($t,)*), ArgError> { Ok(($(decode_arg::<$t>(_args, $i)?,)*)) })();
+                                        match decoded {
+                                                Ok(_values) => start_async_export(self($(_values.$i),*)),
+                                                Err(error) => {
+                                                        trace_str(&format!("export '{}' argument {}: {}, call skipped\n", name, error.index + 1, error.reason));
+                                                        Value::Null
+                                                }
+                                        }
+                                })
+                        }
+                }
+        };
+}
+impl_async_export_handler!();
+impl_async_export_handler!(A 0);
+impl_async_export_handler!(A 0, B 1);
+impl_async_export_handler!(A 0, B 1, C 2);
+impl_async_export_handler!(A 0, B 1, C 2, D 3);
+impl_async_export_handler!(A 0, B 1, C 2, D 3, E 4);
+impl_async_export_handler!(A 0, B 1, C 2, D 3, E 4, F5 5);
+impl_async_export_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6);
+impl_async_export_handler!(A 0, B 1, C 2, D 3, E 4, F5 5, G 6, H 7);
+
+fn deliver_async_export(callback: &str, value: Value) {
+        let payload = encode(&Value::Array(vec![Value::Array(vec![value]), Value::Null]));
+        invoke_function_reference(callback, &payload);
+}
+
+fn start_async_export<Fut>(future: Fut) -> Value
+where Fut: Future + 'static, Fut::Output: Into<Value> {
+        struct Reply {
+                callback: Option<String>,
+                result: Option<Value>,
+        }
+        let reply = Rc::new(std::cell::RefCell::new(Reply { callback: None, result: None }));
+        let asked = reply.clone();
+        let (retval, _) = create_canonical_ref(Rc::new(move |data: &[u8]| -> Vec<u8> {
+                let decoded = ensure_array(decode(data));
+                let callback = decoded.at(0).func_ref_str().to_string();
+                if callback.is_empty() { return vec![0x90]; }
+                let ready = asked.borrow_mut().result.take();
+                match ready {
+                        Some(value) => deliver_async_export(&callback, value),
+                        None => asked.borrow_mut().callback = Some(callback),
+                }
+                vec![0x90]
+        }));
+        if retval.is_empty() { return Value::Null; }
+        create_coroutine_now(async move {
+                let value: Value = future.await.into();
+                let callback = reply.borrow_mut().callback.take();
+                match callback {
+                        Some(callback) => deliver_async_export(&callback, value),
+                        None => reply.borrow_mut().result = Some(value),
+                }
+        });
+        Value::Object(vec![("__cfx_async_retval".into(), Value::FuncRef(retval))])
+}
+
 macro_rules! impl_typed_event_handler {
         ($($t:ident $i:tt),*) => {
                 impl<F, $($t: FromArg),*> IntoEventHandler<($($t,)*)> for F where F: Fn(i32 $(, $t)*) + 'static {

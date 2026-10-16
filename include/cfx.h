@@ -2217,6 +2217,28 @@ EventHandler WrapTypedHandler(const std::string& event, F&& fn)
         };
 }
 
+}
+
+namespace cfx
+{
+
+template<typename T>
+struct Async;
+
+}
+
+namespace cfx::detail
+{
+
+template<typename T>
+struct IsAsyncExport : std::false_type { };
+
+template<typename T>
+struct IsAsyncExport<cfx::Async<T>> : std::true_type { };
+
+template<typename T>
+json::Value startAsyncExport(cfx::Async<T> task);
+
 template<typename F, typename ArgsTuple, size_t... Is>
 json::Value InvokeTypedExport(F& fn, const std::string& name, const EventArgs& args, std::index_sequence<Is...>)
 {
@@ -2227,10 +2249,16 @@ json::Value InvokeTypedExport(F& fn, const std::string& name, const EventArgs& a
                 fxw_internal::traceMessage("export '" + name + "' argument " + std::to_string(error.index + 1) + ": " + error.reason + ", call skipped\n");
                 return { };
         }
-        if constexpr (std::is_void_v<decltype(fn(std::move(std::get<Is>(values))...))>)
+        using Result = decltype(fn(std::move(std::get<Is>(values))...));
+        if constexpr (std::is_void_v<Result>)
         {
                 fn(std::move(std::get<Is>(values))...);
                 return { };
+        }
+        else if constexpr (IsAsyncExport<Result>::value)
+        {
+                static_assert((!std::is_reference_v<std::tuple_element_t<Is, ArgsTuple>> && ...), "cfx: async exports must take their parameters by value");
+                return startAsyncExport(fn(std::move(std::get<Is>(values))...));
         }
         else
                 return json::Value(fn(std::move(std::get<Is>(values))...));
@@ -3171,19 +3199,14 @@ inline std::vector<std::string> findKvp(const std::string& prefix)
 namespace fxw_internal
 {
 
-struct WasmPromise;
-using WasmCoroutineHandle = std::coroutine_handle<WasmPromise>;
-
-struct WasmTask;
-
-struct WasmPromise
+struct WasmPromiseBase
 {
         int64_t waitMs = 0;
         std::function<bool()> readyCheck;
+        std::function<void()> onDone;
 #if __cpp_exceptions
         std::exception_ptr exception;
 #endif
-        WasmTask get_return_object();
         std::suspend_always initial_suspend() noexcept
         {
                 return { };
@@ -3192,7 +3215,6 @@ struct WasmPromise
         {
                 return { };
         }
-        void return_void() { }
 #if __cpp_exceptions
         void unhandled_exception()
         {
@@ -3204,6 +3226,17 @@ struct WasmPromise
                 __builtin_abort();
         }
 #endif
+};
+
+struct WasmPromise;
+using WasmCoroutineHandle = std::coroutine_handle<WasmPromise>;
+
+struct WasmTask;
+
+struct WasmPromise : WasmPromiseBase
+{
+        WasmTask get_return_object();
+        void return_void() { }
 };
 
 struct WasmTask
@@ -3219,7 +3252,8 @@ inline WasmTask WasmPromise::get_return_object()
 
 struct CoroutineEntry
 {
-        WasmCoroutineHandle handle;
+        std::coroutine_handle<> handle;
+        WasmPromiseBase* promise;
         std::shared_ptr<void> prevent_destruct;
         std::chrono::steady_clock::time_point resumeAt;
 };
@@ -3258,31 +3292,34 @@ inline void resumeCoroutineById(int32_t id)
         if (it == coros.end())
                 return;
         auto handle = it->second.handle;
-        if (handle.promise().readyCheck && !handle.promise().readyCheck())
+        auto& promise = *it->second.promise;
+        if (promise.readyCheck && !promise.readyCheck())
         {
                 scheduleCoroutine(id, it->second, 0);
                 return;
         }
-        handle.promise().readyCheck = nullptr;
-        handle.promise().waitMs = 0;
+        promise.readyCheck = nullptr;
+        promise.waitMs = 0;
 #if __cpp_exceptions
-        handle.promise().exception = nullptr;
+        promise.exception = nullptr;
 #endif
         auto running = coros.extract(it);
         handle.resume();
         if (handle.done())
         {
 #if __cpp_exceptions
-                if (handle.promise().exception)
+                if (promise.exception)
                 {
                         const char* rn = currentContext() ? currentContext()->resourceName.c_str() : "?";
-                        safeInvoke([&] { std::rethrow_exception(handle.promise().exception); }, rn, "thread");
+                        safeInvoke([&] { std::rethrow_exception(promise.exception); }, rn, "thread");
                 }
 #endif
+                if (promise.onDone)
+                        promise.onDone();
                 handle.destroy();
                 return;
         }
-        scheduleCoroutine(id, running.mapped(), handle.promise().waitMs);
+        scheduleCoroutine(id, running.mapped(), promise.waitMs);
         coros.insert(std::move(running));
 }
 
@@ -3346,7 +3383,8 @@ struct Wait
                 return false;
         }
 
-        void await_suspend(fxw_internal::WasmCoroutineHandle h) const noexcept
+        template<typename P>
+        void await_suspend(std::coroutine_handle<P> h) const noexcept
         {
                 h.promise().waitMs = ms;
         }
@@ -3356,33 +3394,116 @@ struct Wait
 
 namespace detail
 {
-        template<typename F>
-        inline void createCoroutineImpl(F&& fn, bool resumeNow)
+        inline bool coroutineLimitReached()
         {
-                auto* c = fxw_internal::currentContext();
-                if (!c)
-                        return;
+                if (fxw_internal::coroutines().size() < fxw_internal::MAX_COROUTINES)
+                        return false;
+                fxw_internal::traceMessage("coroutine limit (" + std::to_string(fxw_internal::MAX_COROUTINES) + ") reached, dropping new thread\n");
+                return true;
+        }
+
+        inline void startCoroutine(std::coroutine_handle<> handle, fxw_internal::WasmPromiseBase* promise, std::shared_ptr<void> keep, bool resumeNow)
+        {
                 auto& coros = fxw_internal::coroutines();
-                if (coros.size() >= fxw_internal::MAX_COROUTINES)
-                {
-                        fxw_internal::traceMessage("coroutine limit (" + std::to_string(fxw_internal::MAX_COROUTINES) + ") reached, dropping new thread\n");
-                        return;
-                }
-                auto stored = std::make_shared<std::decay_t<F>>(std::forward<F>(fn));
-                auto task = (*stored)();
-                auto& nextId = fxw_internal::nextCoroutineId();
-                int32_t id = cfx::allocateId(nextId, coros);
+                int32_t id = cfx::allocateId(fxw_internal::nextCoroutineId(), coros);
                 if (id < 0)
                 {
                         fxw_internal::traceMessage("no free coroutine id, dropping new thread\n");
+                        handle.destroy();
                         return;
                 }
-                coros[id] = { task.handle, std::move(stored), std::chrono::steady_clock::now() };
+                coros[id] = { handle, promise, std::move(keep), std::chrono::steady_clock::now() };
                 fxw_internal::earliestResume() = std::min(fxw_internal::earliestResume(), coros[id].resumeAt);
                 if (resumeNow)
                         fxw_internal::resumeCoroutineById(id);
                 else
                         __cfxScheduleBookmark(id, 0);
+        }
+
+        template<typename F>
+        inline void createCoroutineImpl(F&& fn, bool resumeNow)
+        {
+                if (!fxw_internal::currentContext() || coroutineLimitReached())
+                        return;
+                auto stored = std::make_shared<std::decay_t<F>>(std::forward<F>(fn));
+                auto task = (*stored)();
+                startCoroutine(task.handle, &task.handle.promise(), std::move(stored), resumeNow);
+        }
+}
+
+template<typename T>
+struct Async
+{
+        struct promise_type : fxw_internal::WasmPromiseBase
+        {
+                std::optional<T> value;
+
+                Async get_return_object()
+                {
+                        return { std::coroutine_handle<promise_type>::from_promise(*this) };
+                }
+
+                void return_value(T result)
+                {
+                        value = std::move(result);
+                }
+        };
+
+        std::coroutine_handle<promise_type> handle;
+};
+
+namespace detail
+{
+        template<typename T>
+        json::Value startAsyncExport(Async<T> task)
+        {
+                struct Reply
+                {
+                        std::string callback;
+                        std::optional<json::Value> result;
+                };
+                auto reply = std::make_shared<Reply>();
+                auto deliver = [](const std::string& callback, json::Value value)
+                {
+                        auto payload = fxw_internal::encode(json::Value::array({ json::Value::array({ std::move(value) }), json::makeNull() }));
+                        invokeFunctionReference(callback, payload.data(), static_cast<uint32_t>(payload.size()));
+                };
+                std::string retval = createCanonicalRef([reply, deliver](const uint8_t* data, uint32_t size) -> std::vector<uint8_t>
+                {
+                        auto decoded = fxw_internal::decode(data, size);
+                        fxw_internal::ensureArray(decoded);
+                        const auto& callback = decoded.at(0);
+                        if (callback.kind != fxw_internal::Value::Kind::FuncRef)
+                                return { MSGPACK_EMPTY_ARRAY };
+                        if (reply->result)
+                        {
+                                json::Value value = std::move(*reply->result);
+                                reply->result.reset();
+                                deliver(callback.scalar, std::move(value));
+                        }
+                        else
+                                reply->callback = callback.scalar;
+                        return { MSGPACK_EMPTY_ARRAY };
+                });
+                if (retval.empty() || coroutineLimitReached())
+                {
+                        task.handle.destroy();
+                        return { };
+                }
+                auto& promise = task.handle.promise();
+                promise.onDone = [&promise, reply, deliver]
+                {
+                        json::Value value = promise.value ? json::Value(std::move(*promise.value)) : json::makeNull();
+                        if (reply->callback.empty())
+                                reply->result = std::move(value);
+                        else
+                                deliver(reply->callback, std::move(value));
+                };
+                startCoroutine(task.handle, &promise, nullptr, true);
+                fxw_internal::Value retvalRef;
+                retvalRef.kind = fxw_internal::Value::Kind::FuncRef;
+                retvalRef.initScalar(retval);
+                return json::Value::object({ { "__cfx_async_retval", std::move(retvalRef) } });
         }
 }
 
@@ -3509,7 +3630,8 @@ struct PollAwaiter
                 return poll();
         }
 
-        void await_suspend(fxw_internal::WasmCoroutineHandle h)
+        template<typename P>
+        void await_suspend(std::coroutine_handle<P> h)
         {
                 h.promise().readyCheck = [this] { return poll(); };
         }
@@ -3550,7 +3672,8 @@ struct ExportAwaiter
                 return result->has_value();
         }
 
-        void await_suspend(fxw_internal::WasmCoroutineHandle h)
+        template<typename P>
+        void await_suspend(std::coroutine_handle<P> h)
         {
                 h.promise().readyCheck = [r = result] { return r->has_value(); };
         }
