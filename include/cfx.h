@@ -3541,6 +3541,33 @@ inline PollAwaiter<ProcessResult, pollProcess> runProcess(const std::string& com
         return { spawnProcess(command) };
 }
 
+struct ExportAwaiter
+{
+        std::shared_ptr<std::optional<json::Value>> result;
+
+        bool await_ready()
+        {
+                return result->has_value();
+        }
+
+        void await_suspend(fxw_internal::WasmCoroutineHandle h)
+        {
+                h.promise().readyCheck = [r = result] { return r->has_value(); };
+        }
+
+        json::Value await_resume()
+        {
+                return std::move(**result);
+        }
+};
+
+inline ExportAwaiter callExportAsync(const std::string& resource, const std::string& name, const std::vector<json::Value>& args = { })
+{
+        auto result = std::make_shared<std::optional<json::Value>>();
+        callExportAsync(resource, name, args, [result](json::Value value) { *result = std::move(value); });
+        return { result };
+}
+
 }
 
 #define CFX_WASM_EXPORT(name) extern "C" __attribute__((weak, export_name(#name)))

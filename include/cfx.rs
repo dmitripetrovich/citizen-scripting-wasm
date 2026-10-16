@@ -1105,7 +1105,34 @@ pub fn call_export(resource: &str, name: &str, args: &[Value]) -> Value {
         match result { Value::Array(ref a) if !a.is_empty() => a[0].clone(), other => other }
 }
 
-pub fn call_export_async(resource: &str, name: &str, args: &[Value], callback: impl FnOnce(Value) + 'static) {
+pub struct ExportCall {
+        result: Rc<std::cell::RefCell<Option<Value>>>,
+}
+
+impl ExportCall {
+        pub fn then(self, callback: impl FnOnce(Value) + 'static) {
+                create_coroutine_now(async move { callback(self.await) });
+        }
+}
+
+impl Future for ExportCall {
+        type Output = Value;
+        fn poll(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<Value> {
+                match self.result.borrow_mut().take() {
+                        Some(value) => Poll::Ready(value),
+                        None => Poll::Pending,
+                }
+        }
+}
+
+pub fn call_export_async(resource: &str, name: &str, args: &[Value]) -> ExportCall {
+        let result = Rc::new(std::cell::RefCell::new(None));
+        let slot = result.clone();
+        start_export_call(resource, name, args, move |value| *slot.borrow_mut() = Some(value));
+        ExportCall { result }
+}
+
+fn start_export_call(resource: &str, name: &str, args: &[Value], callback: impl FnOnce(Value) + 'static) {
         let result = call_export(resource, name, args);
         if let Value::Object(ref entries) = result {
                 if let Some(async_retval) = entries.iter().find(|(k, _)| k.as_str() == "__cfx_async_retval").map(|(_, v)| v) {
