@@ -21,6 +21,7 @@ PARAM_TYPE_MAP = {
         "int": "int",
         "float": "float",
         "BOOL": "bool",
+        "bool": "bool",
         "char*": "const char*",
         "Hash": "uint32_t",
         "Entity": "int",
@@ -60,6 +61,7 @@ RUST_PARAM_TYPE_MAP = {
         "int": ("i32", "val", "{p} as u32 as u64"),
         "float": ("f32", "val", "{p}.to_bits() as u64"),
         "BOOL": ("bool", "val", "if {p} {{ 1u64 }} else {{ 0u64 }}"),
+        "bool": ("bool", "val", "if {p} {{ 1u64 }} else {{ 0u64 }}"),
         "char*": ("&str", "str", None),
         "Hash": ("u32", "val", "{p} as u64"),
         "Entity": ("i32", "val", "{p} as u32 as u64"),
@@ -100,6 +102,7 @@ RUST_RETURN_TYPE_MAP = {
         "int": ("i32", "invoke_native_int"),
         "float": ("f32", "invoke_native_float"),
         "BOOL": ("bool", "invoke_native_bool"),
+        "bool": ("bool", "invoke_native_bool"),
         "char*": ("String", "invoke_native_string"),
         "Hash": ("u32", "invoke_native_int"),
         "Entity": ("i32", "invoke_native_int"),
@@ -132,6 +135,7 @@ RETURN_TYPE_MAP = {
         "int": ("int", "int"),
         "float": ("float", "float"),
         "BOOL": ("bool", "bool"),
+        "bool": ("bool", "bool"),
         "char*": ("std::string", "std::string"),
         "Hash": ("uint32_t", "uint32_t"),
         "Entity": ("int", "int"),
@@ -491,20 +495,23 @@ def main():
                 sys.exit(1)
         def param_sig(native):
                 return tuple(p.get("type", "") for p in native.get("params", []))
-        global_seen: dict[tuple, tuple[str, str]] = {}
+        cfx_ids = {id(n) for n in cfx_natives}
+        cfx_names = {n.get("name") for n in cfx_natives}
+        global_seen: dict[tuple, tuple[str, tuple[bool, int]]] = {}
         for ns in all_ns:
                 for native in all_ns[ns]:
                         name = native.get("name")
                         if not name:
                                 continue
                         key = (name, param_sig(native))
-                        h = native.get("hash", "")
+                        rank = (id(native) in cfx_ids, len(native.get("hash", "")))
                         prev = global_seen.get(key)
-                        if prev is None or len(h) > len(prev[1]):
-                                global_seen[key] = (ns, h)
+                        if prev is None or rank > prev[1]:
+                                global_seen[key] = (ns, rank)
         for ns in all_ns:
                 all_ns[ns] = [n for n in all_ns[ns]
-                                if not n.get("name") or global_seen.get((n["name"], param_sig(n)), (None,))[0] == ns]
+                                if not n.get("name") or (global_seen.get((n["name"], param_sig(n)), (None,))[0] == ns
+                                        and (id(n) in cfx_ids or n["name"] not in cfx_names))]
         cpp_owner: dict[str, str] = {}
         cpp_wrappers: list[tuple[str, str]] = []
         rust_owner: dict[str, str] = {}
