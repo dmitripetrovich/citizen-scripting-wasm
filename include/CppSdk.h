@@ -2917,7 +2917,7 @@ inline void callExportAsync(const std::string& resource, const std::string& name
                 {
                         std::string asyncRef = asyncRetval.scalar;
                         auto shared_cb = std::make_shared<std::function<void(json::Value)>>(std::move(callback));
-                        std::string cbRef = detail::createCanonicalRef([shared_cb](const uint8_t* data, uint32_t size) -> std::vector<uint8_t>
+                        std::string cbRef = detail::createCanonicalRef([shared_cb, resource, name](const uint8_t* data, uint32_t size) -> std::vector<uint8_t>
                 {
                         auto cb = std::move(*shared_cb);
                         *shared_cb = nullptr;
@@ -2925,7 +2925,20 @@ inline void callExportAsync(const std::string& resource, const std::string& name
                                 return { MSGPACK_EMPTY_ARRAY };
                         auto decoded = fxw_internal::decode(data, size);
                         fxw_internal::ensureArray(decoded);
-                        cb(decoded.size() > 0 ? decoded.at(0) : json::makeNull());
+                        using Kind = fxw_internal::Value::Kind;
+                        const auto& error = decoded.at(1);
+                        bool failed = error.kind == Kind::String ? !error.scalar.empty() : !error.isNull() && !(error.kind == Kind::Bool && !error.boolVal);
+                        if (failed)
+                        {
+                                fxw_internal::traceMessage("export '" + resource + ":" + name + "' failed: " + (error.kind == Kind::String ? error.scalar : json::stringify(error)) + "\n");
+                                cb(json::makeNull());
+                                return { MSGPACK_EMPTY_ARRAY };
+                        }
+                        const auto& values = decoded.at(0);
+                        if (values.kind != Kind::Array)
+                                cb(values);
+                        else
+                                cb(values.size() > 0 ? values.at(0) : json::makeNull());
                         return { MSGPACK_EMPTY_ARRAY };
                 });
                         if (cbRef.empty())

@@ -1113,11 +1113,24 @@ pub fn call_export_async(resource: &str, name: &str, args: &[Value], callback: i
                                 let async_ref = async_ref.clone();
                                 let shared_cb = std::rc::Rc::new(std::cell::RefCell::new(Some(callback)));
                                 let shared_cb2 = shared_cb.clone();
+                                let export_name = format!("{}:{}", resource, name);
                                 let (cb_ref_str, _cb_ref_idx) = create_canonical_ref(Rc::new(move |data: &[u8]| -> Vec<u8> {
                                         let decoded = ensure_array(decode(data));
-                                        let val = match &decoded {
-                                                Value::Array(a) if !a.is_empty() => a[0].clone(),
-                                                _ => Value::Null,
+                                        let error = decoded.at(1);
+                                        let failed = match error {
+                                                Value::Null | Value::Bool(false) => false,
+                                                Value::String(s) => !s.is_empty(),
+                                                _ => true,
+                                        };
+                                        let val = if failed {
+                                                let message = match error { Value::String(s) => s.clone(), other => json::stringify(other) };
+                                                trace_str(&format!("export '{}' failed: {}\n", export_name, message));
+                                                Value::Null
+                                        } else {
+                                                match decoded.at(0) {
+                                                        Value::Array(a) => a.first().cloned().unwrap_or(Value::Null),
+                                                        other => other.clone(),
+                                                }
                                         };
                                         if let Some(cb) = shared_cb2.borrow_mut().take() { cb(val); }
                                         vec![0x90]
