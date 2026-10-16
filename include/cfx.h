@@ -302,23 +302,7 @@ struct Value
         Value& operator=(const Value& o)
         {
                 if (this != &o)
-                {
-                        if (hasString() && o.hasString())
-                                scalar = o.scalar;
-                        else
-                        {
-                                if (hasString()) scalar.~basic_string();
-                                if (o.hasString()) new (&scalar) std::string(o.scalar);
-                                else if (o.kind == Kind::Bool) boolVal = o.boolVal;
-                                else numVal = o.numVal;
-                        }
-                        kind = o.kind;
-                        isIntegral = o.isIntegral;
-                        intVal = o.intVal;
-                        children = o.children;
-                        keys = o.keys;
-                        m_keyIndex.reset();
-                }
+                        takeFrom(Value(o));
                 return *this;
         }
 
@@ -338,26 +322,7 @@ struct Value
         Value& operator=(Value&& o) noexcept
         {
                 if (this != &o)
-                {
-                        Kind newKind = o.kind;
-                        bool newIntegral = o.isIntegral;
-                        if (hasString()) scalar.~basic_string();
-                        if (o.hasString())
-                        {
-                                new (&scalar) std::string(std::move(o.scalar));
-                                o.scalar.~basic_string();
-                                o.numVal = 0.0;
-                                o.kind = Kind::Null;
-                        }
-                        else if (newKind == Kind::Bool) boolVal = o.boolVal;
-                        else numVal = o.numVal;
-                        kind = newKind;
-                        isIntegral = newIntegral;
-                        intVal = o.intVal;
-                        children = std::move(o.children);
-                        keys = std::move(o.keys);
-                        m_keyIndex.reset();
-                }
+                        takeFrom(Value(std::move(o)));
                 return *this;
         }
 
@@ -521,6 +486,27 @@ struct Value
                         v.children.push_back(val);
                 }
                 return v;
+        }
+
+    private:
+        void takeFrom(Value&& o) noexcept
+        {
+                if (hasString()) scalar.~basic_string();
+                if (o.hasString())
+                {
+                        new (&scalar) std::string(std::move(o.scalar));
+                        o.scalar.~basic_string();
+                        o.numVal = 0.0;
+                }
+                else if (o.kind == Kind::Bool) boolVal = o.boolVal;
+                else numVal = o.numVal;
+                kind = o.kind;
+                isIntegral = o.isIntegral;
+                intVal = o.intVal;
+                children = std::move(o.children);
+                keys = std::move(o.keys);
+                m_keyIndex.reset();
+                o.kind = Kind::Null;
         }
 };
 
