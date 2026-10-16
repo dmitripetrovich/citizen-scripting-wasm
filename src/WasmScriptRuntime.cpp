@@ -49,6 +49,15 @@ static std::string GetResourcePath(IScriptHost* host, const std::string& name)
         return path ? std::string(path) : std::string{ };
 }
 
+static void RegisterEventHandler(IScriptHost* host, const char* eventName)
+{
+        fxNativeContext ctx{ };
+        ctx.nativeIdentifier = HashString("REGISTER_RESOURCE_AS_EVENT_HANDLER");
+        ctx.arguments[0] = reinterpret_cast<uintptr_t>(eventName);
+        ctx.numArguments = 1;
+        host->InvokeNative(ctx);
+}
+
 static std::string GetConvar(IScriptHost* host, const char* name, const char* defaultValue)
 {
         fxNativeContext ctx{ };
@@ -1551,6 +1560,7 @@ result_t OM_DECL WasmScriptRuntime::Destroy()
                 }
         }
         m_pendingLoads.clear();
+        m_missedStartEvents.clear();
         m_refs.clear();
         m_refToCallbackId.clear();
         for (auto& [id, process] : m_processes)
@@ -2074,28 +2084,55 @@ result_t OM_DECL WasmScriptRuntime::TickBookmarks(uint64_t* bookmarks, int32_t n
         return FX_S_OK;
 }
 
+static bool IsOwnStartEvent(std::string_view name, const char* args, uint32_t size, const std::string& resourceName)
+{
+        if ((name != "onResourceStart" && name != "onServerResourceStart") || !args || size < 2 || static_cast<uint8_t>(args[0]) != 0x91)
+                return false;
+        uint8_t tag = static_cast<uint8_t>(args[1]);
+        size_t len = 0;
+        size_t header = 2;
+        if ((tag & 0xE0) == 0xA0)
+                len = tag & 0x1F;
+        else if (tag == 0xD9 && size >= 3)
+        {
+                len = static_cast<uint8_t>(args[2]);
+                header = 3;
+        }
+        else
+                return false;
+        return size == header + len && std::string_view(args + header, len) == resourceName;
+}
+
 result_t OM_DECL WasmScriptRuntime::TriggerEvent(char* eventName, char* argsSerialized, uint32_t serializedSize, char* sourceId)
 {
         if (!eventName)
                 return FX_S_OK;
-        if (std::none_of(m_modules.begin(), m_modules.end(), [](const std::shared_ptr<WasmModule>& m) { return m->hasEventFn; }))
-                return FX_S_OK;
-        fx::PushEnvironment env(static_cast<IScriptRuntime*>(this));
-        BoundaryGuard boundary(m_host.GetRef(), static_cast<int64_t>(nextBoundaryId()));
         std::string_view name(eventName);
         std::string_view src(sourceId ? sourceId : "-1");
+        if (!m_pendingLoads.empty() && IsOwnStartEvent(name, argsSerialized, serializedSize, m_resourceName))
+                m_missedStartEvents.push_back({ std::string(name), std::vector<char>(argsSerialized, argsSerialized + serializedSize), std::string(src) });
+        dispatchEvent(m_modules, name, argsSerialized, serializedSize, src);
+        return FX_S_OK;
+}
+
+void WasmScriptRuntime::dispatchEvent(const std::vector<std::shared_ptr<WasmModule>>& targets, std::string_view name, const char* argsSerialized, uint32_t serializedSize, std::string_view src)
+{
+        if (std::none_of(targets.begin(), targets.end(), [](const std::shared_ptr<WasmModule>& m) { return m->hasEventFn; }))
+                return;
+        fx::PushEnvironment env(static_cast<IScriptRuntime*>(this));
+        BoundaryGuard boundary(m_host.GetRef(), static_cast<int64_t>(nextBoundaryId()));
         uint64_t nameAllocSz64 = static_cast<uint64_t>(name.size()) + 1;
         uint64_t argsAllocSz64 = serializedSize > 0 ? static_cast<uint64_t>(serializedSize) : 1;
         uint64_t srcAllocSz64 = static_cast<uint64_t>(src.size()) + 1;
         uint64_t totalSz64 = nameAllocSz64 + argsAllocSz64 + srcAllocSz64;
         if (totalSz64 > UINT32_MAX)
-                return FX_S_OK;
+                return;
         uint32_t nameAllocSz = static_cast<uint32_t>(nameAllocSz64);
         uint32_t argsAllocSz = static_cast<uint32_t>(argsAllocSz64);
         uint32_t totalSz = static_cast<uint32_t>(totalSz64);
         bool outerCanceled = m_eventCanceled;
         m_eventCanceled = false;
-        auto modules = m_modules;
+        auto modules = targets;
         for (auto& mod : modules)
         {
                 if (!mod->hasEventFn || !mod->store)
@@ -2121,11 +2158,10 @@ result_t OM_DECL WasmScriptRuntime::TriggerEvent(char* eventName, char* argsSeri
                 base[srcWasm + src.size()] = '\0';
                 bool eventOk = mod->callEvent(nameWasm, static_cast<uint32_t>(name.size()), argsWasm, serializedSize, srcWasm, static_cast<uint32_t>(src.size()));
                 if (!eventOk && !(mod->limitExceeded && mod->callDepth > 0))
-                        ScriptPrint(m_host.GetRef(), m_resourceName, "^1SCRIPT ERROR: @" + m_resourceName + "/" + mod->scriptFile + ": WASM trap in event '" + eventName + "'^7");
+                        ScriptPrint(m_host.GetRef(), m_resourceName, "^1SCRIPT ERROR: @" + m_resourceName + "/" + mod->scriptFile + ": WASM trap in event '" + std::string(name) + "'^7");
                 mod->wasmFree(block, totalSz);
         }
         m_eventCanceled = outerCanceled;
-        return FX_S_OK;
 }
 
 result_t OM_DECL WasmScriptRuntime::CallRef(int32_t refIdx, char* argsSerialized, uint32_t argsSize, IScriptBuffer** retval)
@@ -3011,14 +3047,20 @@ void WasmScriptRuntime::drainPendingLoads()
                 return;
         std::vector<PendingLoad> loads(std::make_move_iterator(m_pendingLoads.begin()), std::make_move_iterator(m_pendingLoads.begin() + ready));
         m_pendingLoads.erase(m_pendingLoads.begin(), m_pendingLoads.begin() + ready);
+        std::vector<std::shared_ptr<WasmModule>> loaded;
         for (auto& load : loads)
         {
                 if (load.job && !load.job->ok)
                         continue;
                 wasmtime_module_t* module = load.job ? wasmtime_module_clone(load.job->module) : CompileWasmFile(load.wasmFile, load.root);
-                if (module)
-                        loadWasm(module, load.scriptFile, load.wasmFile);
+                if (module && loadWasm(module, load.scriptFile, load.wasmFile) == FX_S_OK)
+                        loaded.push_back(m_modules.back());
         }
+        auto missed = m_missedStartEvents;
+        if (m_pendingLoads.empty())
+                m_missedStartEvents.clear();
+        for (auto& event : missed)
+                dispatchEvent(loaded, event.name, event.args.data(), static_cast<uint32_t>(event.args.size()), event.source);
 }
 
 result_t OM_DECL WasmScriptRuntime::LoadFile(char* scriptFile)
@@ -3147,6 +3189,9 @@ result_t OM_DECL WasmScriptRuntime::LoadFile(char* scriptFile)
                                 slot = job;
                         }
                         m_pendingLoads.push_back({ std::move(job), scriptFile, wasmFile, resolvedRoot });
+                        fx::PushEnvironment env(static_cast<IScriptRuntime*>(this));
+                        RegisterEventHandler(m_host.GetRef(), "onResourceStart");
+                        RegisterEventHandler(m_host.GetRef(), "onServerResourceStart");
                         return FX_S_OK;
                 }
         }

@@ -193,8 +193,16 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
                 std::string root;
         };
         std::vector<PendingLoad> m_pendingLoads;
+        struct MissedEvent
+        {
+                std::string name;
+                std::vector<char> args;
+                std::string source;
+        };
+        std::vector<MissedEvent> m_missedStartEvents;
         std::unordered_map<std::string, std::pair<std::string, std::string>> m_outputOwners;
         void drainPendingLoads();
+        void dispatchEvent(const std::vector<std::shared_ptr<WasmModule>>& targets, std::string_view name, const char* argsSerialized, uint32_t serializedSize, std::string_view src);
         void defineImports(WasmModule& mod);
         bool resolveExports(WasmModule& mod);
         void destroyModule(WasmModule& mod);
