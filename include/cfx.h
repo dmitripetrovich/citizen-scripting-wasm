@@ -994,7 +994,7 @@ inline void encodeOne(Writer& w, T&& v)
                 }
         }
         else
-                static_assert(unsupportedArg<D>, "cfx: unsupported argument type, pass a number, bool, string, enum, std::optional, a container of those, or cfx::json::Value");
+                static_assert(unsupportedArg<D>, "cfx: unsupported argument type, pass a number, bool, string, enum, std::optional, a container of those, or cfx::Value");
 }
 
 template<typename... TArgs>
@@ -1007,6 +1007,13 @@ inline std::vector<uint8_t> encodeArgs(TArgs&&... vals)
 }
 
 using RefCallbackFn = std::function<std::vector<uint8_t>(const uint8_t*, uint32_t)>;
+
+}
+
+namespace cfx
+{
+
+using Value = fxw_internal::Value;
 
 }
 

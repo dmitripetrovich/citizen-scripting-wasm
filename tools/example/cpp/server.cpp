@@ -60,7 +60,7 @@ Server
                 std::println("{} ({}) has sent a chat message: {}", name, author, message);
         });
 
-        cfx::addStateBagChangeHandler("", "", [](const std::string& bagName, const std::string& key, const cfx::json::Value& value, int source, bool replicated)
+        cfx::addStateBagChangeHandler("", "", [](const std::string& bagName, const std::string& key, const cfx::Value& value, int source, bool replicated)
         {
                 std::println("[cfx::addStateBagChangeHandler] {}:{} changed (source={}, replicated={})", bagName, key, source, replicated);
         });
@@ -98,7 +98,7 @@ Server
                 if (source == 0)
                         return;
                 std::string name = cfx::getCurrentResourceName();
-                cfx::json::Value info = cfx::callExport(name, "getPlayerInfo", { source });
+                cfx::Value info = cfx::callExport(name, "getPlayerInfo", { source });
                 std::println("[cfx::addExport] {}", info.asStr("failed"));
                 cfx::callExport("fw", "SendChatMessage", { source, "^#f0a0e4[INFO] ^#ffffffHello from ^#f0a0e4C++^#ffffff!" });
         }, false);
