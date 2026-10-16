@@ -687,7 +687,7 @@ struct Context {
         next_callback_id: i32,
         state_bag_handler_refs: HashMap<i32, i32>,
         export_ref_cache: HashMap<String, String>,
-        http_callbacks: HashMap<i32, Box<dyn FnOnce(i32, String, String)>>,
+        http_callbacks: HashMap<i32, Box<dyn FnOnce(HttpResponse)>>,
         http_response_registered: bool,
 }
 
@@ -1603,36 +1603,93 @@ fn create_coroutine_impl(f: impl Future<Output = ()> + 'static, resume_now: bool
         }
 }
 
-pub fn perform_http_request(url: &str, method: &str, data: &str, headers: &[(&str, &str)], follow_location: bool, callback: impl FnOnce(i32, String, String) + 'static) {
-        let mut headers_json = "{}".to_string();
-        if !headers.is_empty() {
-                let mut parts = Vec::new();
-                for (k, v) in headers {
-                        parts.push(format!("{}:{}", json::quote(k), json::quote(v)));
+pub struct HttpResponse {
+        pub status: i32,
+        pub body: String,
+        pub headers: HashMap<String, String>,
+        pub error: String,
+}
+
+impl HttpResponse {
+        pub fn ok(&self) -> bool { (200..300).contains(&self.status) }
+}
+
+pub struct HttpRequest {
+        url: String,
+        method: String,
+        body: String,
+        headers: Vec<(String, String)>,
+        follow_location: bool,
+}
+
+pub fn http_request(url: &str) -> HttpRequest {
+        HttpRequest { url: url.to_string(), method: "GET".to_string(), body: String::new(), headers: Vec::new(), follow_location: true }
+}
+
+impl HttpRequest {
+        pub fn method(mut self, method: &str) -> Self { self.method = method.to_string(); self }
+        pub fn body(mut self, body: impl Into<String>) -> Self { self.body = body.into(); self }
+        pub fn header(mut self, name: &str, value: &str) -> Self { self.headers.push((name.to_string(), value.to_string())); self }
+        pub fn follow_location(mut self, follow: bool) -> Self { self.follow_location = follow; self }
+        pub fn then(self, callback: impl FnOnce(HttpResponse) + 'static) { start_http_request(self, callback); }
+}
+
+pub struct HttpCall {
+        response: Rc<std::cell::RefCell<Option<HttpResponse>>>,
+}
+
+impl Future for HttpCall {
+        type Output = HttpResponse;
+        fn poll(self: Pin<&mut Self>, _cx: &mut std::task::Context<'_>) -> Poll<HttpResponse> {
+                match self.response.borrow_mut().take() {
+                        Some(response) => Poll::Ready(response),
+                        None => Poll::Pending,
                 }
-                headers_json = format!("{{{}}}", parts.join(","));
         }
-        let payload = format!(r#"{{"url":{},"method":{},"data":{},"headers":{},"followLocation":{}}}"#, json::quote(url), json::quote(method), json::quote(data), headers_json, follow_location);
+}
+
+impl std::future::IntoFuture for HttpRequest {
+        type Output = HttpResponse;
+        type IntoFuture = HttpCall;
+        fn into_future(self) -> HttpCall {
+                let response = Rc::new(std::cell::RefCell::new(None));
+                let slot = response.clone();
+                start_http_request(self, move |result| *slot.borrow_mut() = Some(result));
+                HttpCall { response }
+        }
+}
+
+fn start_http_request(request: HttpRequest, callback: impl FnOnce(HttpResponse) + 'static) {
+        let headers: Vec<String> = request.headers.iter().map(|(k, v)| format!("{}:{}", json::quote(k), json::quote(v))).collect();
+        let payload = format!(r#"{{"url":{},"method":{},"data":{},"headers":{{{}}},"followLocation":{}}}"#, json::quote(&request.url), json::quote(&request.method), json::quote(&request.body), headers.join(","), request.follow_location);
         let payload_cs = CString::new(payload.as_str()).unwrap_or_default();
         let r = invoke_native_raw(hash_string(b"PERFORM_HTTP_REQUEST_INTERNAL"), &[NativeArg::ptr(payload_cs.as_ptr() as u64), NativeArg::val(payload.len() as u64)], 1, 0);
         let token = r.args[0] as i32;
-        if token == -1 { return; }
+        if token == -1 {
+                callback(HttpResponse { status: 0, body: String::new(), headers: HashMap::new(), error: "request could not be started".to_string() });
+                return;
+        }
         let c = ctx();
         unsafe { (*c).http_callbacks.insert(token, Box::new(callback)) };
-        if !unsafe { (*c).http_response_registered } {
-                unsafe { (*c).http_response_registered = true };
-                on("__cfx_internal:httpResponse", |_source: i32, args: &EventArgs| {
-                        if args.len() < 4 { return; }
-                        let tok = args.int(0);
-                        let c = ctx();
-                        if let Some(cb) = unsafe { (*c).http_callbacks.remove(&tok) } {
-                                let status = args.int(1);
-                                let body = args.str(2).to_string();
-                                let headers = args.str(3).to_string();
-                                cb(status, body, headers);
+        if unsafe { (*c).http_response_registered } { return; }
+        unsafe { (*c).http_response_registered = true };
+        on("__cfx_internal:httpResponse", |_source: i32, args: &EventArgs| {
+                if args.len() < 4 { return; }
+                let c = ctx();
+                if let Some(cb) = unsafe { (*c).http_callbacks.remove(&args.int(0)) } {
+                        let headers = match args.value(3) {
+                                Value::Object(entries) => entries.iter().map(|(k, v)| (k.clone(), v.as_str().to_string())).collect(),
+                                _ => HashMap::new(),
+                        };
+                        let mut response = HttpResponse { status: args.int(1), body: args.str(2).to_string(), headers, error: args.str(4).to_string() };
+                        let prefix = format!("HTTP {}: ", response.status);
+                        if response.body.is_empty() && response.error.starts_with(&prefix) {
+                                response.body = response.error.split_off(prefix.len());
+                                response.error.truncate(prefix.len() - 2);
                         }
-                });
-        }
+                        cb(response);
+                }
+        });
 }
 
 pub mod json {

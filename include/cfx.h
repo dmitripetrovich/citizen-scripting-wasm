@@ -1842,7 +1842,20 @@ using StopHandler = std::function<void()>;
 using CommandHandler = std::function<void(int source, const std::vector<std::string>& args)>;
 using ExportHandler = std::function<json::Value(const EventArgs&)>;
 using StateBagChangeHandler = std::function<void(const std::string& bagName, const std::string& key, const json::Value& value, int source, bool replicated)>;
-using HttpCallback = std::function<void(int statusCode, const std::string& body, const std::string& headers)>;
+struct HttpResponse
+{
+        int status = 0;
+        std::string body;
+        std::unordered_map<std::string, std::string> headers;
+        std::string error;
+
+        bool ok() const
+        {
+                return status >= 200 && status < 300;
+        }
+};
+
+using HttpCallback = std::function<void(HttpResponse)>;
 
 }
 
@@ -3074,45 +3087,59 @@ inline void onCommand(const std::string& command, CommandHandler h, bool restric
 namespace cfx
 {
 
-inline void performHttpRequest(const std::string& url, HttpCallback cb, const std::string& method = "GET", const std::string& data = "", std::initializer_list<std::pair<std::string, std::string>> headers = {}, bool followLocation = true)
+struct HttpOptions
 {
-        std::string headersJson = "{}";
-        if (headers.size() > 0)
-        {
-                json::JsonObj obj;
-                for (auto& [k, v] : headers)
-                        obj.set(k, v);
-                headersJson = obj.build();
-        }
-        std::string payload = "{\"url\":" + json::quote(url) + ",\"method\":" + json::quote(method) + ",\"data\":" + json::quote(data) + ",\"headers\":" + headersJson + ",\"followLocation\":" + (followLocation ? "true" : "false") + "}";
+        std::string method = "GET";
+        std::string body;
+        std::vector<std::pair<std::string, std::string>> headers;
+        bool followLocation = true;
+};
+
+inline void httpRequest(const std::string& url, const HttpOptions& options, HttpCallback callback)
+{
+        json::JsonObj headers;
+        for (const auto& [name, value] : options.headers)
+                headers.set(name, value);
+        std::string payload = "{\"url\":" + json::quote(url) + ",\"method\":" + json::quote(options.method) + ",\"data\":" + json::quote(options.body) + ",\"headers\":" + (options.headers.empty() ? std::string("{}") : headers.build()) + ",\"followLocation\":" + (options.followLocation ? "true" : "false") + "}";
         auto ctx = invokeNative(HashString("PERFORM_HTTP_REQUEST_INTERNAL"), { NativeArg::ptr(payload.c_str()), NativeArg(static_cast<int32_t>(payload.size())) }, 1);
         int32_t token = static_cast<int32_t>(ctx.args[0]);
-        if (token == -1)
-                return;
         auto* c = fxw_internal::currentContext();
-        if (!c)
-                return;
-        c->httpCallbacks[token] = std::move(cb);
-        if (!c->httpResponseRegistered)
+        if (token == -1 || !c)
         {
-                c->httpResponseRegistered = true;
-                on("__cfx_internal:httpResponse", [](int, const EventArgs& args)
-                {
-                        auto* ctx = fxw_internal::currentContext();
-                        if (!ctx || args.size() < 4)
-                                return;
-                        int32_t tok = args.get<int>(0);
-                        auto it = ctx->httpCallbacks.find(tok);
-                        if (it == ctx->httpCallbacks.end())
-                                return;
-                        auto userCb = std::move(it->second);
-                        ctx->httpCallbacks.erase(it);
-                        int status = args.get<int>(1);
-                        std::string body = args.str(2);
-                        std::string respHeaders = args.str(3);
-                        fxw_internal::safeInvoke([&] { userCb(status, body, respHeaders); }, ctx->resourceName.c_str(), "http callback");
-                });
+                HttpResponse response;
+                response.error = "request could not be started";
+                callback(std::move(response));
+                return;
         }
+        c->httpCallbacks[token] = std::move(callback);
+        if (c->httpResponseRegistered)
+                return;
+        c->httpResponseRegistered = true;
+        on("__cfx_internal:httpResponse", [](int, const EventArgs& args)
+        {
+                auto* ctx = fxw_internal::currentContext();
+                if (!ctx || args.size() < 4)
+                        return;
+                auto it = ctx->httpCallbacks.find(args.get<int>(0));
+                if (it == ctx->httpCallbacks.end())
+                        return;
+                auto userCb = std::move(it->second);
+                ctx->httpCallbacks.erase(it);
+                HttpResponse response;
+                response.status = args.get<int>(1);
+                response.body = args.str(2);
+                const auto& headers = args.value(3);
+                for (size_t i = 0; i < headers.keys.size() && i < headers.children.size(); ++i)
+                        response.headers[headers.keys[i]] = headers.children[i].asStr();
+                response.error = args.value(4).asStr();
+                std::string prefix = "HTTP " + std::to_string(response.status) + ": ";
+                if (response.body.empty() && response.error.starts_with(prefix))
+                {
+                        response.body = response.error.substr(prefix.size());
+                        response.error.resize(prefix.size() - 2);
+                }
+                fxw_internal::safeInvoke([&] { userCb(std::move(response)); }, ctx->resourceName.c_str(), "http callback");
+        });
 }
 
 inline int32_t setTimeout(uint32_t ms, std::function<void()> cb)
@@ -3683,6 +3710,34 @@ struct ExportAwaiter
                 return std::move(**result);
         }
 };
+
+struct HttpAwaiter
+{
+        std::shared_ptr<std::optional<HttpResponse>> response;
+
+        bool await_ready()
+        {
+                return response->has_value();
+        }
+
+        template<typename P>
+        void await_suspend(std::coroutine_handle<P> h)
+        {
+                h.promise().readyCheck = [r = response] { return r->has_value(); };
+        }
+
+        HttpResponse await_resume()
+        {
+                return std::move(**response);
+        }
+};
+
+inline HttpAwaiter httpRequest(const std::string& url, const HttpOptions& options = { })
+{
+        auto response = std::make_shared<std::optional<HttpResponse>>();
+        httpRequest(url, options, [response](HttpResponse result) { *response = std::move(result); });
+        return { response };
+}
 
 inline ExportAwaiter callExportAsync(const std::string& resource, const std::string& name, const std::vector<json::Value>& args = { })
 {
