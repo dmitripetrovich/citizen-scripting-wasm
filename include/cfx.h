@@ -280,6 +280,25 @@ namespace fxw_internal
 inline constexpr size_t MAX_TIMERS = 8192;
 inline constexpr size_t MAX_COROUTINES = 4096;
 
+inline std::vector<std::string>& pendingRefReleases()
+{
+        static std::vector<std::string> s_refs;
+        return s_refs;
+}
+
+struct FuncRefOwner
+{
+        std::string ref;
+
+        ~FuncRefOwner()
+        {
+                pendingRefReleases().push_back(std::move(ref));
+        }
+};
+
+inline std::string duplicateFuncRef(const std::string& ref);
+inline void releasePendingRefs();
+
 struct Value
 {
         enum class Kind
@@ -309,6 +328,7 @@ struct Value
         std::vector<Value> children;
         std::vector<std::string> keys;
         mutable std::unique_ptr<std::unordered_map<std::string_view, size_t>> m_keyIndex;
+        std::shared_ptr<FuncRefOwner> refOwner;
 
         bool hasString() const { return kind == Kind::String || kind == Kind::FuncRef || kind == Kind::Bin; }
 
@@ -322,7 +342,7 @@ struct Value
         Value() : numVal(0.0) { }
         ~Value() { if (hasString()) scalar.~basic_string(); }
 
-        Value(const Value& o) : kind(o.kind), isIntegral(o.isIntegral), intVal(o.intVal), vec(o.vec), children(o.children), keys(o.keys)
+        Value(const Value& o) : kind(o.kind), isIntegral(o.isIntegral), intVal(o.intVal), vec(o.vec), children(o.children), keys(o.keys), refOwner(o.refOwner)
         {
                 if (o.hasString()) new (&scalar) std::string(o.scalar);
                 else if (o.kind == Kind::Bool) boolVal = o.boolVal;
@@ -336,7 +356,7 @@ struct Value
                 return *this;
         }
 
-        Value(Value&& o) noexcept : kind(o.kind), isIntegral(o.isIntegral), intVal(o.intVal), vec(o.vec), children(std::move(o.children)), keys(std::move(o.keys))
+        Value(Value&& o) noexcept : kind(o.kind), isIntegral(o.isIntegral), intVal(o.intVal), vec(o.vec), children(std::move(o.children)), keys(std::move(o.keys)), refOwner(std::move(o.refOwner))
         {
                 if (o.hasString())
                 {
@@ -560,6 +580,16 @@ struct Value
                 return v;
         }
 
+        static Value funcRef(std::string ref, bool owned)
+        {
+                Value v;
+                v.kind = Kind::FuncRef;
+                if (owned && !ref.empty())
+                        v.refOwner = std::make_shared<FuncRefOwner>(ref);
+                v.initScalar(std::move(ref));
+                return v;
+        }
+
         static Value object(std::initializer_list<std::pair<std::string, Value>> entries)
         {
                 Value v;
@@ -592,6 +622,7 @@ struct Value
                 vec = o.vec;
                 children = std::move(o.children);
                 keys = std::move(o.keys);
+                refOwner = std::move(o.refOwner);
                 m_keyIndex.reset();
                 o.kind = Kind::Null;
         }
@@ -702,10 +733,11 @@ struct Reader
                 uint8_t t = u8();
                 if (t == 10)
                 {
-                        Value v;
-                        v.kind = Value::Kind::FuncRef;
-                        v.initScalar(str(n));
-                        return v;
+                        std::string ref = str(n);
+                        if (error)
+                                return { };
+                        std::string owned = duplicateFuncRef(ref);
+                        return owned.empty() ? Value::funcRef(std::move(ref), false) : Value::funcRef(std::move(owned), true);
                 }
                 Value::Kind vectorKind = t == 20 ? Value::Kind::Vector2 : t == 21 ? Value::Kind::Vector3 : t == 22 ? Value::Kind::Vector4 : t == 23 ? Value::Kind::Quaternion : Value::Kind::Null;
                 size_t count = Value::components(vectorKind);
@@ -962,7 +994,8 @@ struct Writer : cfx::MsgpackWriter
                         }
                         case Value::Kind::FuncRef:
                         {
-                                uint32_t n = (uint32_t)v.scalar.size();
+                                const std::string& ref = v.scalar;
+                                uint32_t n = (uint32_t)ref.size();
                                 if (n <= 255)
                                 {
                                         pu8(0xC7);
@@ -979,7 +1012,7 @@ struct Writer : cfx::MsgpackWriter
                                         pu32(n);
                                 }
                                 pu8(10);
-                                buf.insert(buf.end(), v.scalar.begin(), v.scalar.end());
+                                buf.insert(buf.end(), ref.begin(), ref.end());
                                 break;
                         }
                         case Value::Kind::Array:
@@ -2368,6 +2401,42 @@ inline std::vector<uint8_t> invokeFunctionReference(const std::string& ref, cons
 
 }
 
+inline void fxw_internal::releasePendingRefs()
+{
+        while (!pendingRefReleases().empty())
+        {
+                std::vector<std::string> refs = std::move(pendingRefReleases());
+                pendingRefReleases().clear();
+                for (const auto& ref : refs)
+                {
+                        cfx::NativeCtx ctx{ };
+                        ctx.hash = HashString("DELETE_FUNCTION_REFERENCE");
+                        ctx.numArgs = 1;
+                        ctx.args[0] = reinterpret_cast<uint64_t>(ref.c_str());
+                        ctx.ptrMask = 1;
+                        __cfxInvokeNative(reinterpret_cast<uint32_t>(&ctx));
+                }
+        }
+}
+
+inline std::string fxw_internal::duplicateFuncRef(const std::string& ref)
+{
+        cfx::NativeCtx ctx{ };
+        ctx.hash = HashString("DUPLICATE_FUNCTION_REFERENCE");
+        ctx.numArgs = 1;
+        ctx.numResults = 1;
+        ctx.resultPtrMask = 1;
+        ctx.args[0] = reinterpret_cast<uint64_t>(ref.c_str());
+        ctx.ptrMask = 1;
+        __cfxInvokeNative(reinterpret_cast<uint32_t>(&ctx));
+        int32_t len = __cfxCopyStringResult(reinterpret_cast<uint32_t>(&ctx), 0, nullptr, 0);
+        if (len <= 0)
+                return { };
+        std::string out(static_cast<size_t>(len), '\0');
+        __cfxCopyStringResult(reinterpret_cast<uint32_t>(&ctx), 0, out.data(), len + 1);
+        return out;
+}
+
 template<typename... TArgs>
 fxw_internal::Value fxw_internal::Value::call(TArgs&&... args) const
 {
@@ -3196,10 +3265,7 @@ inline json::Value callback(F&& fn)
         std::string ref = detail::createHandlerRef(detail::toExportHandler("callback", std::forward<F>(fn)));
         if (ref.empty())
                 return { };
-        fxw_internal::Value value;
-        value.kind = fxw_internal::Value::Kind::FuncRef;
-        value.initScalar(ref);
-        return value;
+        return fxw_internal::Value::funcRef(std::move(ref), true);
 }
 
 template<typename F>
@@ -3217,41 +3283,35 @@ inline void addExport(const std::string& name, F&& fn)
                 std::string setterRef = args.funcRef(0);
                 if (setterRef.empty())
                         return;
-                fxw_internal::Value refVal;
-                refVal.kind = fxw_internal::Value::Kind::FuncRef;
-                refVal.initScalar(exportRef);
-                auto payload = fxw_internal::encode(fxw_internal::Value::array({ std::move(refVal) }));
+                auto payload = fxw_internal::encode(fxw_internal::Value::array({ fxw_internal::Value::funcRef(exportRef, false) }));
                 detail::invokeFunctionReference(setterRef, payload.data(), static_cast<uint32_t>(payload.size()));
         });
 }
 
 namespace detail
 {
-        inline std::unordered_map<std::string, std::string>& exportRefCache()
+        inline std::unordered_map<std::string, json::Value>& exportRefCache()
         {
-                static std::unordered_map<std::string, std::string> s_cache;
+                static std::unordered_map<std::string, json::Value> s_cache;
                 return s_cache;
         }
 
-        inline std::string resolveExportRef(const std::string& resource, const std::string& name)
+        inline json::Value resolveExportRef(const std::string& resource, const std::string& name)
         {
-                auto capturedRef = std::make_shared<std::string>();
+                auto capturedRef = std::make_shared<json::Value>();
                 int32_t setterRef = -1;
                 std::string setterRefStr = createCanonicalRef([capturedRef](const uint8_t* data, uint32_t size) -> std::vector<uint8_t>
                 {
                         auto decoded = fxw_internal::decode(data, size);
                         if (decoded.kind == fxw_internal::Value::Kind::FuncRef)
-                                *capturedRef = decoded.scalar;
+                                *capturedRef = decoded;
                         else if (decoded.kind == fxw_internal::Value::Kind::Array && decoded.size() > 0 && decoded.at(0).kind == fxw_internal::Value::Kind::FuncRef)
-                                *capturedRef = decoded.at(0).scalar;
+                                *capturedRef = decoded.at(0);
                         return { MSGPACK_EMPTY_ARRAY };
                 }, &setterRef);
                 if (setterRefStr.empty())
                         return { };
-                fxw_internal::Value setterVal;
-                setterVal.kind = fxw_internal::Value::Kind::FuncRef;
-                setterVal.initScalar(setterRefStr);
-                auto setterPayload = fxw_internal::encode(fxw_internal::Value::array({ std::move(setterVal) }));
+                auto setterPayload = fxw_internal::encode(fxw_internal::Value::array({ fxw_internal::Value::funcRef(setterRefStr, false) }));
                 std::string eventName = "__cfx_export_" + resource + "_" + name;
                 __cfxEmitEvent(eventName.c_str(), static_cast<uint32_t>(eventName.size()), setterPayload.data(), static_cast<uint32_t>(setterPayload.size()));
                 removeRef(setterRef);
@@ -3264,29 +3324,29 @@ inline json::Value callExport(const std::string& resource, const std::string& na
         std::string cacheKey = resource + '/' + name;
         auto& cache = detail::exportRefCache();
         auto cit = cache.find(cacheKey);
-        std::string exportRef;
+        json::Value exportRef;
         if (cit != cache.end())
                 exportRef = cit->second;
         else
         {
                 exportRef = detail::resolveExportRef(resource, name);
-                if (exportRef.empty())
+                if (exportRef.isNull())
                         return { };
                 cache.emplace(cacheKey, exportRef);
         }
         auto userPayload = fxw_internal::encode(fxw_internal::Value::array(args));
-        auto retData = detail::invokeFunctionReference(exportRef, userPayload.data(), static_cast<uint32_t>(userPayload.size()));
+        auto retData = detail::invokeFunctionReference(exportRef.scalar, userPayload.data(), static_cast<uint32_t>(userPayload.size()));
         if (retData.empty())
         {
                 cache.erase(cacheKey);
-                std::string oldRef = exportRef;
+                std::string oldRef = exportRef.scalar;
                 exportRef = detail::resolveExportRef(resource, name);
-                if (exportRef.empty())
+                if (exportRef.isNull())
                         return { };
                 cache.emplace(cacheKey, exportRef);
-                if (exportRef == oldRef)
+                if (exportRef.scalar == oldRef)
                         return { };
-                retData = detail::invokeFunctionReference(exportRef, userPayload.data(), static_cast<uint32_t>(userPayload.size()));
+                retData = detail::invokeFunctionReference(exportRef.scalar, userPayload.data(), static_cast<uint32_t>(userPayload.size()));
                 if (retData.empty())
                 {
                         cache.erase(cacheKey);
@@ -3340,10 +3400,7 @@ inline void callExportAsync(const std::string& resource, const std::string& name
                                 if (cb) cb(json::makeNull());
                                 return;
                         }
-                        fxw_internal::Value cbVal;
-                        cbVal.kind = fxw_internal::Value::Kind::FuncRef;
-                        cbVal.initScalar(cbRef);
-                        auto payload = fxw_internal::encode(fxw_internal::Value::array({ std::move(cbVal) }));
+                        auto payload = fxw_internal::encode(fxw_internal::Value::array({ fxw_internal::Value::funcRef(std::move(cbRef), true) }));
                         detail::invokeFunctionReference(asyncRef, payload.data(), static_cast<uint32_t>(payload.size()));
                         return;
                 }
@@ -3791,7 +3848,7 @@ namespace detail
         {
                 struct Reply
                 {
-                        std::string callback;
+                        json::Value callback;
                         std::optional<json::Value> result;
                 };
                 auto reply = std::make_shared<Reply>();
@@ -3800,7 +3857,7 @@ namespace detail
                         auto payload = fxw_internal::encode(json::Value::array({ json::Value::array({ std::move(value) }), json::makeNull() }));
                         invokeFunctionReference(callback, payload.data(), static_cast<uint32_t>(payload.size()));
                 };
-                std::string retval = createCanonicalRef([reply, deliver](const uint8_t* data, uint32_t size) -> std::vector<uint8_t>
+                json::Value retval = json::Value::funcRef(createCanonicalRef([reply, deliver](const uint8_t* data, uint32_t size) -> std::vector<uint8_t>
                 {
                         auto decoded = fxw_internal::decode(data, size);
                         fxw_internal::ensureArray(decoded);
@@ -3814,10 +3871,10 @@ namespace detail
                                 deliver(callback.scalar, std::move(value));
                         }
                         else
-                                reply->callback = callback.scalar;
+                                reply->callback = callback;
                         return { MSGPACK_EMPTY_ARRAY };
-                });
-                if (retval.empty() || coroutineLimitReached())
+                }), true);
+                if (retval.scalar.empty() || coroutineLimitReached())
                 {
                         task.handle.destroy();
                         return { };
@@ -3826,16 +3883,17 @@ namespace detail
                 promise.onDone = [&promise, reply, deliver]
                 {
                         json::Value value = promise.value ? json::Value(std::move(*promise.value)) : json::makeNull();
-                        if (reply->callback.empty())
+                        if (reply->callback.isNull())
                                 reply->result = std::move(value);
                         else
-                                deliver(reply->callback, std::move(value));
+                        {
+                                json::Value callback = std::move(reply->callback);
+                                reply->callback = { };
+                                deliver(callback.scalar, std::move(value));
+                        }
                 };
                 startCoroutine(task.handle, &promise, nullptr, true);
-                fxw_internal::Value retvalRef;
-                retvalRef.kind = fxw_internal::Value::Kind::FuncRef;
-                retvalRef.initScalar(retval);
-                return json::Value::object({ { "__cfx_async_retval", std::move(retvalRef) } });
+                return json::Value::object({ { "__cfx_async_retval", std::move(retval) } });
         }
 }
 
@@ -4070,7 +4128,7 @@ void __cfxFree(void* ptr, uint32_t)
 CFX_WASM_EXPORT(__cfx_has_pending_work)
 int32_t __cfxHasPendingWork()
 {
-        if (fxw_internal::hasDueCoroutines())
+        if (fxw_internal::hasDueCoroutines() || !fxw_internal::pendingRefReleases().empty())
                 return 1;
         auto* c = fxw_internal::currentContext();
         if (!c)
@@ -4081,6 +4139,7 @@ int32_t __cfxHasPendingWork()
 CFX_WASM_EXPORT(__cfx_on_tick)
 void __cfxOnTick()
 {
+        fxw_internal::releasePendingRefs();
         fxw_internal::resumeCoroutines();
         if (auto* c = fxw_internal::currentContext())
                 c->dispatchTick();
@@ -4115,6 +4174,7 @@ void __cfxOnStop()
                 c->stateBagHandlerRefs.clear();
                 c->dispatchStop();
         }
+        fxw_internal::releasePendingRefs();
 }
 
 CFX_WASM_EXPORT(__cfx_invoke_ref)
@@ -4164,7 +4224,12 @@ void __cfxRemoveRefCallback(int32_t callback_id)
         if (--it->second <= 0)
         {
                 counts.erase(it);
-                fxw_internal::refCallbacks().erase(callback_id);
+                auto& callbacks = fxw_internal::refCallbacks();
+                auto cit = callbacks.find(callback_id);
+                if (cit == callbacks.end())
+                        return;
+                auto callback = std::move(cit->second);
+                callbacks.erase(cit);
         }
 }
 

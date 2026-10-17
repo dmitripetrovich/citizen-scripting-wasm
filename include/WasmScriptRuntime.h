@@ -159,6 +159,7 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         std::string m_resourceName;
         WasmModule* m_activeModule = nullptr;
         std::unordered_map<int32_t, fx::RefCallback> m_refs;
+        std::unordered_map<int32_t, int32_t> m_refCounts;
         int32_t m_nextRefIdx = 1;
         int32_t allocRefIdx();
         uint64_t m_nextBoundaryId = 1;

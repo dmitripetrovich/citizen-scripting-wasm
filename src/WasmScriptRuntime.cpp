@@ -1571,6 +1571,7 @@ result_t OM_DECL WasmScriptRuntime::Destroy()
         m_pendingLoads.clear();
         m_missedStartEvents.clear();
         m_refs.clear();
+        m_refCounts.clear();
         m_refToCallbackId.clear();
         for (auto& [id, process] : m_processes)
                 process->cancelled.store(true, std::memory_order_relaxed);
@@ -1609,6 +1610,7 @@ int32_t WasmScriptRuntime::AddFuncRef(fx::RefCallback cb)
         if (idx < 0)
                 return -1;
         m_refs[idx] = std::move(cb);
+        m_refCounts[idx] = 1;
         return idx;
 }
 
@@ -1923,6 +1925,7 @@ void WasmScriptRuntime::destroyModule(WasmModule& mod)
                 if (it->second.mod == &mod)
                 {
                         m_refs.erase(it->first);
+                        m_refCounts.erase(it->first);
                         it = m_refToCallbackId.erase(it);
                 }
                 else
@@ -2203,34 +2206,32 @@ result_t OM_DECL WasmScriptRuntime::CallRef(int32_t refIdx, char* argsSerialized
 
 result_t OM_DECL WasmScriptRuntime::DuplicateRef(int32_t refIdx, int32_t* newRefIdx)
 {
-        auto it = m_refs.find(refIdx);
-        if (it == m_refs.end())
+        if (m_refs.find(refIdx) == m_refs.end())
                 return FX_E_INVALIDARG;
-        int32_t idx = allocRefIdx();
-        if (idx < 0)
-                return FX_E_INVALIDARG;
-        *newRefIdx = idx;
-        m_refs[idx] = it->second;
+        ++m_refCounts[refIdx];
+        *newRefIdx = refIdx;
         auto cit = m_refToCallbackId.find(refIdx);
         if (cit != m_refToCallbackId.end())
-        {
-                WasmRef ref = cit->second;
-                m_refToCallbackId.emplace(*newRefIdx, ref);
-                ref.mod->duplicateRef(ref.callbackId);
-        }
+                cit->second.mod->duplicateRef(cit->second.callbackId);
         return FX_S_OK;
 }
 
 result_t OM_DECL WasmScriptRuntime::RemoveRef(int32_t refIdx)
 {
+        auto count = m_refCounts.find(refIdx);
+        bool last = count == m_refCounts.end() || --count->second <= 0;
+        if (last && count != m_refCounts.end())
+                m_refCounts.erase(count);
         auto cit = m_refToCallbackId.find(refIdx);
         if (cit != m_refToCallbackId.end())
         {
                 WasmRef ref = cit->second;
-                m_refToCallbackId.erase(cit);
+                if (last)
+                        m_refToCallbackId.erase(cit);
                 ref.mod->removeRef(ref.callbackId);
         }
-        m_refs.erase(refIdx);
+        if (last)
+                m_refs.erase(refIdx);
         return FX_S_OK;
 }
 

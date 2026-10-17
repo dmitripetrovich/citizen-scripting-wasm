@@ -174,6 +174,59 @@ impl NativeArg {
         pub const fn val(v: u64) -> Self { Self { value: v, is_ptr: false } }
         pub const fn ptr(v: u64) -> Self { Self { value: v, is_ptr: true } }
 }
+
+struct FuncRefOwner {
+        id: String,
+        owned: bool,
+}
+
+static PENDING_REF_RELEASES: GlobalCell<Vec<String>> = GlobalCell::new(Vec::new());
+
+impl Drop for FuncRefOwner {
+        fn drop(&mut self) {
+                if self.owned {
+                        unsafe { (*PENDING_REF_RELEASES.get()).push(std::mem::take(&mut self.id)) };
+                }
+        }
+}
+
+fn release_pending_refs() {
+        loop {
+                let refs = unsafe { std::mem::take(&mut *PENDING_REF_RELEASES.get()) };
+                if refs.is_empty() { break; }
+                for r in refs {
+                        let id = CString::new(r).unwrap_or_default();
+                        invoke_native_void(hash_string(b"DELETE_FUNCTION_REFERENCE"), &[NativeArg::ptr(id.as_ptr() as u64)]);
+                }
+        }
+}
+
+#[derive(Clone)]
+pub struct FuncRef(Rc<FuncRefOwner>);
+
+impl FuncRef {
+        pub fn new(id: impl Into<String>) -> Self { FuncRef(Rc::new(FuncRefOwner { id: id.into(), owned: false })) }
+        fn owned(id: String) -> Self {
+                let owned = !id.is_empty();
+                FuncRef(Rc::new(FuncRefOwner { id, owned }))
+        }
+        pub fn as_str(&self) -> &str { &self.0.id }
+        fn acquire(id: String) -> Self {
+                let cs = CString::new(id.as_str()).unwrap_or_default();
+                let dup = invoke_native_string(hash_string(b"DUPLICATE_FUNCTION_REFERENCE"), &[NativeArg::ptr(cs.as_ptr() as u64)]);
+                if dup.is_empty() { FuncRef::new(id) } else { FuncRef::owned(dup) }
+        }
+}
+
+impl std::ops::Deref for FuncRef {
+        type Target = str;
+        fn deref(&self) -> &str { self.as_str() }
+}
+
+impl std::fmt::Debug for FuncRef {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "FuncRef({:?})", self.as_str()) }
+}
+
 #[derive(Clone, Debug)]
 pub enum Value {
         Null,
@@ -184,14 +237,16 @@ pub enum Value {
         Binary(Vec<u8>),
         Array(Vec<Value>),
         Object(Vec<(String, Value)>),
-        FuncRef(String),
+        FuncRef(FuncRef),
         Vector2(Vector2),
         Vector3(Vector3),
         Vector4(Vector4),
         Quaternion(Quaternion),
 }
 
-static NULL_VALUE: Value = Value::Null;
+struct NullValue(Value);
+unsafe impl Sync for NullValue {}
+static NULL_VALUE: NullValue = NullValue(Value::Null);
 
 impl Default for Value {
         fn default() -> Self { Value::Null }
@@ -235,7 +290,7 @@ impl Value {
         }
         pub fn is_empty(&self) -> bool { self.len() == 0 }
         pub fn at(&self, i: usize) -> &Value {
-                match self { Value::Array(v) => v.get(i).unwrap_or(&NULL_VALUE), _ => &NULL_VALUE }
+                match self { Value::Array(v) => v.get(i).unwrap_or(&NULL_VALUE.0), _ => &NULL_VALUE.0 }
         }
         pub fn get(&self, key: &str) -> &Value {
                 match self {
@@ -243,9 +298,9 @@ impl Value {
                                 for (k, v) in entries {
                                         if k == key { return v; }
                                 }
-                                &NULL_VALUE
+                                &NULL_VALUE.0
                         }
-                        _ => &NULL_VALUE,
+                        _ => &NULL_VALUE.0,
                 }
         }
         pub fn has(&self, key: &str) -> bool {
@@ -262,7 +317,7 @@ impl Value {
                 }
         }
         pub fn func_ref_str(&self) -> &str {
-                match self { Value::FuncRef(s) => s, _ => "" }
+                match self { Value::FuncRef(s) => s.as_str(), _ => "" }
         }
         fn components(&self, n: usize, quaternion: bool) -> Option<[f32; 4]> {
                 match (self, n, quaternion) {
@@ -430,7 +485,8 @@ impl MsgpackWriter {
                                 self.map_header(entries.len() as u32);
                                 for (k, v) in entries { self.enc_str(k); self.enc_value(v); }
                         }
-                        Value::FuncRef(s) => {
+                        Value::FuncRef(r) => {
+                                let s = r.as_str();
                                 let n = s.len() as u32;
                                 if n <= 255 { self.pu8(0xC7); self.pu8(n as u8); }
                                 else if n <= 65535 { self.pu8(0xC8); self.pu16(n as u16); }
@@ -511,7 +567,7 @@ impl<'a> MsgpackReader<'a> {
                         let val = self.read(depth + 1);
                         if let Value::String(ref s) = key {
                                 if s == "__cfx_functionReference" {
-                                        return Value::FuncRef(val.as_str().to_string());
+                                        return Value::FuncRef(FuncRef::new(val.as_str()));
                                 }
                         }
                         return Value::Object(vec![(Self::key_name(key, 0), val)]);
@@ -529,7 +585,8 @@ impl<'a> MsgpackReader<'a> {
         fn read_ext(&mut self, n: usize) -> Value {
                 let t = self.u8();
                 if t == 10 {
-                        return Value::FuncRef(self.read_str(n));
+                        let id = self.read_str(n);
+                        return if self.error { Value::Null } else { Value::FuncRef(FuncRef::acquire(id)) };
                 }
                 let data = self.bytes(n);
                 let count = match t { 20 => 2, 21 => 3, 22 | 23 => 4, _ => 0 };
@@ -732,15 +789,14 @@ fn deliver_async_export(callback: &str, value: Value) {
 fn start_async_export<Fut>(future: Fut) -> Value
 where Fut: Future + 'static, Fut::Output: Into<Value> {
         struct Reply {
-                callback: Option<String>,
+                callback: Option<FuncRef>,
                 result: Option<Value>,
         }
         let reply = Rc::new(std::cell::RefCell::new(Reply { callback: None, result: None }));
         let asked = reply.clone();
         let (retval, _) = create_canonical_ref(Rc::new(move |data: &[u8]| -> Vec<u8> {
                 let decoded = ensure_array(decode(data));
-                let callback = decoded.at(0).func_ref_str().to_string();
-                if callback.is_empty() { return vec![0x90]; }
+                let callback = match decoded.at(0) { Value::FuncRef(r) => r.clone(), _ => return vec![0x90] };
                 let ready = asked.borrow_mut().result.take();
                 match ready {
                         Some(value) => deliver_async_export(&callback, value),
@@ -757,7 +813,7 @@ where Fut: Future + 'static, Fut::Output: Into<Value> {
                         None => reply.borrow_mut().result = Some(value),
                 }
         });
-        Value::Object(vec![("__cfx_async_retval".into(), Value::FuncRef(retval))])
+        Value::Object(vec![("__cfx_async_retval".into(), Value::FuncRef(FuncRef::owned(retval)))])
 }
 
 macro_rules! impl_typed_event_handler {
@@ -830,7 +886,7 @@ struct Context {
         pending_ref_result: Option<(i32, Vec<u8>)>,
         next_callback_id: i32,
         state_bag_handler_refs: HashMap<i32, i32>,
-        export_ref_cache: HashMap<String, String>,
+        export_ref_cache: HashMap<String, FuncRef>,
         http_callbacks: HashMap<i32, Box<dyn FnOnce(HttpResponse)>>,
         http_response_registered: bool,
 }
@@ -1279,7 +1335,7 @@ fn create_handler_ref(handler: ExportHandlerFn) -> String {
 
 pub fn callback<M>(handler: impl IntoExportHandler<M>) -> Value {
         let r = create_handler_ref(handler.into_export_handler("callback"));
-        if r.is_empty() { Value::Null } else { Value::FuncRef(r) }
+        if r.is_empty() { Value::Null } else { Value::FuncRef(FuncRef::owned(r)) }
 }
 
 pub fn add_export<M>(name: &str, handler: impl IntoExportHandler<M>) {
@@ -1287,13 +1343,12 @@ pub fn add_export<M>(name: &str, handler: impl IntoExportHandler<M>) {
         if export_ref.is_empty() { return; }
         let res_name = get_current_resource_name();
         let event_name = format!("__cfx_export_{}_{}", res_name, name);
-        let export_ref_clone = export_ref.clone();
+        let export_ref = FuncRef::new(export_ref);
         on(&event_name, move |_source: i32, args: &EventArgs| {
                 if args.len() == 0 { return; }
                 let setter_ref = args.func_ref(0);
                 if setter_ref.is_empty() { return; }
-                let ref_val = Value::FuncRef(export_ref_clone.clone());
-                let payload = encode(&Value::Array(vec![ref_val]));
+                let payload = encode(&Value::Array(vec![Value::FuncRef(export_ref.clone())]));
                 invoke_function_reference(setter_ref, &payload);
         });
 }
@@ -1303,23 +1358,22 @@ pub fn call_export(resource: &str, name: &str, args: impl IntoArgs) -> Value {
         let args = args.as_slice();
         let cache_key = format!("{}/{}", resource, name);
         let c = ctx();
-        let cached = unsafe { (*c).export_ref_cache.get(&cache_key).cloned() }.unwrap_or_default();
-        let mut export_ref = if cached.is_empty() {
-                let resolved = resolve_export_ref(resource, name);
-                if resolved.is_empty() { return Value::Null; }
-                unsafe { (*ctx()).export_ref_cache.insert(cache_key.clone(), resolved.clone()) };
-                resolved
-        } else {
-                cached.clone()
+        let cached = unsafe { (*c).export_ref_cache.get(&cache_key).cloned() };
+        let mut export_ref = match cached {
+                Some(cached) => cached,
+                None => {
+                        let resolved = match resolve_export_ref(resource, name) { Some(r) => r, None => return Value::Null };
+                        unsafe { (*ctx()).export_ref_cache.insert(cache_key.clone(), resolved.clone()) };
+                        resolved
+                }
         };
         let user_payload = encode(&Value::Array(args.to_vec()));
         let ret_data = invoke_function_reference(&export_ref, &user_payload);
         if ret_data.is_empty() {
                 unsafe { (*ctx()).export_ref_cache.remove(&cache_key) };
-                let resolved = resolve_export_ref(resource, name);
-                if resolved.is_empty() { return Value::Null; }
+                let resolved = match resolve_export_ref(resource, name) { Some(r) => r, None => return Value::Null };
                 unsafe { (*ctx()).export_ref_cache.insert(cache_key.clone(), resolved.clone()) };
-                if resolved == export_ref {
+                if resolved.as_str() == export_ref.as_str() {
                         return Value::Null;
                 }
                 export_ref = resolved;
@@ -1396,7 +1450,7 @@ fn start_export_call(resource: &str, name: &str, args: &[Value], callback: impl 
                                         if let Some(cb) = shared_cb.borrow_mut().take() { cb(Value::Null); }
                                         return;
                                 }
-                                let payload = encode(&Value::Array(vec![Value::FuncRef(cb_ref_str)]));
+                                let payload = encode(&Value::Array(vec![Value::FuncRef(FuncRef::owned(cb_ref_str))]));
                                 invoke_function_reference(&async_ref, &payload);
                                 return;
                         }
@@ -1405,28 +1459,26 @@ fn start_export_call(resource: &str, name: &str, args: &[Value], callback: impl 
         callback(result);
 }
 
-fn resolve_export_ref(resource: &str, name: &str) -> String {
-        let captured = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+fn resolve_export_ref(resource: &str, name: &str) -> Option<FuncRef> {
+        let captured: Rc<std::cell::RefCell<Option<FuncRef>>> = Rc::new(std::cell::RefCell::new(None));
         let captured2 = captured.clone();
         let (setter_ref_str, setter_ref_idx) = create_canonical_ref(Rc::new(move |data: &[u8]| -> Vec<u8> {
-                let decoded = decode(data);
-                let s = match &decoded {
-                        Value::FuncRef(s) => s.clone(),
-                        Value::Array(a) if !a.is_empty() => a[0].func_ref_str().to_string(),
-                        _ => String::new(),
+                let r = match decode(data) {
+                        Value::FuncRef(r) => Some(r),
+                        Value::Array(mut a) if !a.is_empty() => match a.swap_remove(0) { Value::FuncRef(r) => Some(r), _ => None },
+                        _ => None,
                 };
-                *captured2.borrow_mut() = s;
+                *captured2.borrow_mut() = r;
                 vec![0x90]
         }));
-        if setter_ref_str.is_empty() { return String::new(); }
-        let setter_val = Value::FuncRef(setter_ref_str);
-        let setter_payload = encode(&Value::Array(vec![setter_val]));
+        if setter_ref_str.is_empty() { return None; }
+        let setter_payload = encode(&Value::Array(vec![Value::FuncRef(FuncRef::new(setter_ref_str))]));
         let event_name = format!("__cfx_export_{}_{}", resource, name);
         unsafe {
                 __cfx_emit_event(event_name.as_ptr(), event_name.len() as u32, setter_payload.as_ptr(), setter_payload.len() as u32);
         }
         remove_ref_idx(setter_ref_idx);
-        let result = captured.borrow().clone();
+        let result = captured.borrow_mut().take();
         result
 }
 
@@ -2100,7 +2152,8 @@ pub mod json {
                         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
                         Value::Int(n) => out.push_str(&n.to_string()),
                         Value::Float(f) => out.push_str(&format_number(*f)),
-                        Value::String(s) | Value::FuncRef(s) => out.push_str(&quote(s)),
+                        Value::String(s) => out.push_str(&quote(s)),
+                        Value::FuncRef(r) => out.push_str(&quote(r)),
                         Value::Vector2(v) => stringify_components(out, &[v.x, v.y]),
                         Value::Vector3(v) => stringify_components(out, &[v.x, v.y, v.z]),
                         Value::Vector4(v) => stringify_components(out, &[v.x, v.y, v.z, v.w]),
@@ -2366,6 +2419,7 @@ pub mod runtime {
         }
 
         pub fn on_tick() {
+                release_pending_refs();
                 if has_due_coroutines() {
                         let c = ctx();
                         let now = unsafe { (*c).now_ms() };
@@ -2453,6 +2507,7 @@ pub mod runtime {
                 for h in snapshot {
                         h();
                 }
+                release_pending_refs();
         }
 
         pub fn alloc(size: u32) -> *mut u8 {
@@ -2471,7 +2526,7 @@ pub mod runtime {
 
         pub fn has_pending_work() -> i32 {
                 let c = ctx();
-                if unsafe { !(*c).ticks.is_empty() || !(*c).timers.is_empty() } || has_due_coroutines() { 1 } else { 0 }
+                if unsafe { !(*c).ticks.is_empty() || !(*c).timers.is_empty() || !(*PENDING_REF_RELEASES.get()).is_empty() } || has_due_coroutines() { 1 } else { 0 }
         }
 
         pub fn invoke_ref(callback_id: i32, args_ptr: *const u8, args_len: u32, result_ptr: *mut u8, result_max: u32) -> i32 {
