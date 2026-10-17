@@ -248,6 +248,7 @@ struct WasmModule : std::enable_shared_from_this<WasmModule>
         std::string lastNativeError;
         std::string stdioBuffer;
         uint32_t bookmarkSlot = 0;
+        bool destroyPending = false;
 
         uint8_t* wasmBase();
         size_t wasmMemSize();

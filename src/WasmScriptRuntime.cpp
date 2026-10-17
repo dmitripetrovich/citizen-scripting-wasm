@@ -1578,7 +1578,12 @@ result_t OM_DECL WasmScriptRuntime::Destroy()
         m_processes.clear();
         destroyWorkers();
         for (auto& mod : m_modules)
-                destroyModule(*mod);
+        {
+                if (mod->callDepth > 0)
+                        mod->destroyPending = true;
+                else
+                        destroyModule(*mod);
+        }
         m_modules.clear();
         m_host = { };
         m_metadataHost = { };
@@ -1683,6 +1688,11 @@ bool WasmModule::call(const wasmtime_func_t& fn, const wasmtime_val_t* args, siz
         --callDepth;
         if (!ok && !nested)
                 FlushModuleStdio(*this, true);
+        if (!nested && destroyPending)
+        {
+                destroyPending = false;
+                rt->destroyModule(*this);
+        }
         return ok;
 }
 
