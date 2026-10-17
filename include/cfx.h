@@ -4241,15 +4241,7 @@ void __cfx_init()
         setvbuf(stdout, nullptr, _IOLBF, 0);
         static fxw_internal::Context s_ctx;
         fxw_internal::currentContext() = &s_ctx;
-        {
-                static constexpr const char k[] = "resource_name";
-                int32_t len = __cfxGetResourceMetadata(k, sizeof(k) - 1, 0, nullptr, 0);
-                if (len > 0)
-                {
-                        s_ctx.resourceName.resize(static_cast<size_t>(len));
-                        __cfxGetResourceMetadata(k, sizeof(k) - 1, 0, s_ctx.resourceName.data(), len + 1);
-                }
-        }
+        s_ctx.resourceName = cfx::getCurrentResourceName();
         cfx::on("onServerResourceStop", [](int, std::string resource)
         {
                 std::string prefix = resource + '/';

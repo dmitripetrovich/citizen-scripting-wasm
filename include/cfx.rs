@@ -866,7 +866,6 @@ struct CoroutineEntry {
 }
 
 struct Context {
-        resource_name: String,
         events: HashMap<String, Vec<EventHandlerEntry>>,
         handler_event_map: HashMap<i32, String>,
         next_event_handler_id: i32,
@@ -894,7 +893,6 @@ struct Context {
 impl Context {
         fn new() -> Self {
                 Self {
-                        resource_name: String::new(),
                         events: HashMap::new(),
                         handler_event_map: HashMap::new(),
                         next_event_handler_id: 1,
@@ -2398,17 +2396,6 @@ pub mod runtime {
 
         pub fn init(main_fn: fn()) {
                 unsafe { *CTX.get() = Some(Context::new()); }
-                {
-                        let c = ctx();
-                        let key = b"resource_name";
-                        let len = unsafe { __cfx_get_resource_metadata(key.as_ptr(), key.len() as u32, 0, std::ptr::null_mut(), 0) };
-                        if len > 0 {
-                                let mut buf = vec![0u8; (len + 1) as usize];
-                                unsafe { __cfx_get_resource_metadata(key.as_ptr(), key.len() as u32, 0, buf.as_mut_ptr(), len + 1); }
-                                buf.truncate(len as usize);
-                                unsafe { (*c).resource_name = String::from_utf8(buf).unwrap_or_default() };
-                        }
-                }
                 on("onServerResourceStop", |_source: i32, args: &EventArgs| {
                         if args.len() == 0 { return; }
                         let resource = args.str(0);
