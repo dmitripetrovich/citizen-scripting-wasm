@@ -448,7 +448,26 @@ inline void closeInheritedFds(posix_spawn_file_actions_t* actions)
         closedir(dir);
 }
 
-inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv, bool searchPath, size_t maxOutputBytes, int timeoutMs, bool killOnOutputCap, const std::atomic<bool>* cancel)
+struct SpawnOptions
+{
+        std::vector<std::string> env;
+        std::function<bool(std::string& error)> beforeSpawn;
+};
+
+inline bool envOverridden(const SpawnOptions* options, std::string_view entry)
+{
+        if (!options)
+                return false;
+        std::string_view key = entry.substr(0, entry.find('=') + 1);
+        for (const auto& e : options->env)
+        {
+                if (std::string_view(e).starts_with(key))
+                        return true;
+        }
+        return false;
+}
+
+inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv, bool searchPath, size_t maxOutputBytes, int timeoutMs, bool killOnOutputCap, const std::atomic<bool>* cancel, const SpawnOptions* options = nullptr)
 {
         ProcessResult result{ };
         int pipefd[2];
@@ -460,7 +479,15 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
         const auto& envStrs = cachedFilteredEnv();
         std::vector<char*> envp;
         for (const auto& s : envStrs)
-                envp.push_back(const_cast<char*>(s.data()));
+        {
+                if (!envOverridden(options, s))
+                        envp.push_back(const_cast<char*>(s.data()));
+        }
+        if (options)
+        {
+                for (const auto& s : options->env)
+                        envp.push_back(const_cast<char*>(s.data()));
+        }
         envp.push_back(nullptr);
         posix_spawn_file_actions_t actions;
         posix_spawn_file_actions_init(&actions);
@@ -474,6 +501,20 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
         posix_spawnattr_init(&attr);
         posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
         posix_spawnattr_setpgroup(&attr, 0);
+        if (options && options->beforeSpawn)
+        {
+                std::string error;
+                if (!options->beforeSpawn(error))
+                {
+                        posix_spawn_file_actions_destroy(&actions);
+                        posix_spawnattr_destroy(&attr);
+                        close(pipefd[0]);
+                        close(pipefd[1]);
+                        result.status = -1;
+                        result.output = error;
+                        return result;
+                }
+        }
         pid_t pid = 0;
         int spawnErr = searchPath ? posix_spawnp(&pid, path, &actions, &attr, const_cast<char**>(argv), envp.data()) : posix_spawn(&pid, path, &actions, &attr, const_cast<char**>(argv), envp.data());
         posix_spawn_file_actions_destroy(&actions);
@@ -596,7 +637,7 @@ inline ProcessResult spawnProcess(const std::string& command, size_t maxOutputBy
         return spawnProcessImpl("/bin/sh", argv, false, maxOutputBytes, timeoutMs, true, cancel);
 }
 
-inline ProcessResult spawnProgram(const std::vector<std::string>& args, size_t maxOutputBytes = 1048576, int timeoutMs = 30000)
+inline ProcessResult spawnProgram(const std::vector<std::string>& args, size_t maxOutputBytes = 1048576, int timeoutMs = 30000, const SpawnOptions* options = nullptr)
 {
         if (args.empty())
         {
@@ -608,7 +649,7 @@ inline ProcessResult spawnProgram(const std::vector<std::string>& args, size_t m
         for (const auto& a : args)
                 argv.push_back(a.c_str());
         argv.push_back(nullptr);
-        return spawnProcessImpl(argv[0], argv.data(), true, maxOutputBytes, timeoutMs, false, nullptr);
+        return spawnProcessImpl(argv[0], argv.data(), true, maxOutputBytes, timeoutMs, false, nullptr, options);
 }
 
 }

@@ -18,7 +18,10 @@
 #include <dlfcn.h>
 #include <ftw.h>
 #include <fcntl.h>
+#include <linux/landlock.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 #include <unordered_map>
 
@@ -2543,6 +2546,156 @@ static bool processFailed(const fx::ProcessResult& result, std::string& reason)
         return true;
 }
 
+struct CompileSandbox
+{
+        std::vector<std::string> read;
+        std::vector<std::string> write;
+        std::vector<std::string> env;
+};
+
+static const char* const g_sandboxSystemPaths[] = { "/usr", "/lib", "/lib64", "/bin", "/etc/ld.so.cache" };
+
+static int LandlockAbi()
+{
+        static const int s_abi = static_cast<int>(syscall(SYS_landlock_create_ruleset, nullptr, 0, LANDLOCK_CREATE_RULESET_VERSION));
+        return s_abi;
+}
+
+static bool ApplyLandlock(const CompileSandbox& sandbox, std::string& error)
+{
+        int abi = LandlockAbi();
+        if (abi < 1)
+        {
+                static std::once_flag s_warned;
+                std::call_once(s_warned, []
+                {
+                        LogWarning("Landlock is unavailable, C++ and Rust resources compile without the file sandbox and can read any file the server can");
+                });
+                return true;
+        }
+        uint64_t fileAccess = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_READ_FILE;
+        if (abi >= 3)
+                fileAccess |= LANDLOCK_ACCESS_FS_TRUNCATE;
+        if (abi >= 5)
+                fileAccess |= LANDLOCK_ACCESS_FS_IOCTL_DEV;
+        uint64_t fullAccess = fileAccess | LANDLOCK_ACCESS_FS_READ_DIR | LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_REMOVE_FILE | LANDLOCK_ACCESS_FS_MAKE_CHAR | LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG | LANDLOCK_ACCESS_FS_MAKE_SOCK | LANDLOCK_ACCESS_FS_MAKE_FIFO | LANDLOCK_ACCESS_FS_MAKE_BLOCK | LANDLOCK_ACCESS_FS_MAKE_SYM;
+        if (abi >= 2)
+                fullAccess |= LANDLOCK_ACCESS_FS_REFER;
+        uint64_t readAccess = LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR;
+        landlock_ruleset_attr attr{ };
+        attr.handled_access_fs = fullAccess;
+        int rulesetFd = static_cast<int>(syscall(SYS_landlock_create_ruleset, &attr, sizeof(attr), 0));
+        if (rulesetFd < 0)
+        {
+                error = std::string("could not create the compile sandbox: ") + strerror(errno);
+                return false;
+        }
+        auto allow = [&](const std::string& path, uint64_t access)
+        {
+                if (path.empty())
+                        return true;
+                int fd = open(path.c_str(), O_PATH | O_CLOEXEC);
+                if (fd < 0)
+                        return errno == ENOENT;
+                struct stat st;
+                if (fstat(fd, &st) == 0 && !S_ISDIR(st.st_mode))
+                        access &= fileAccess;
+                landlock_path_beneath_attr rule{ };
+                rule.allowed_access = access;
+                rule.parent_fd = fd;
+                bool added = syscall(SYS_landlock_add_rule, rulesetFd, LANDLOCK_RULE_PATH_BENEATH, &rule, 0) == 0;
+                if (!added)
+                        error = "could not allow '" + path + "' in the compile sandbox: " + strerror(errno);
+                close(fd);
+                return added;
+        };
+        bool ok = allow("/dev/null", fileAccess & ~LANDLOCK_ACCESS_FS_EXECUTE);
+        for (const char* path : g_sandboxSystemPaths)
+                ok = ok && allow(path, readAccess);
+        for (const auto& path : sandbox.read)
+                ok = ok && allow(path, readAccess);
+        for (const auto& path : sandbox.write)
+                ok = ok && allow(path, fullAccess);
+        if (ok && (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 || syscall(SYS_landlock_restrict_self, rulesetFd, 0) != 0))
+        {
+                error = std::string("could not enter the compile sandbox: ") + strerror(errno);
+                ok = false;
+        }
+        close(rulesetFd);
+        return ok;
+}
+
+static fx::ProcessResult RunSandboxed(const std::vector<std::string>& args, const CompileSandbox& sandbox, int timeoutMs)
+{
+        fx::SpawnOptions options;
+        options.env = sandbox.env;
+        options.beforeSpawn = [&sandbox](std::string& error)
+        {
+                return ApplyLandlock(sandbox, error);
+        };
+        fx::ProcessResult result{ };
+        result.status = -1;
+        try
+        {
+                std::thread([&]
+                {
+                        result = fx::spawnProgram(args, 1048576, timeoutMs, &options);
+                }).join();
+        }
+        catch (...)
+        {
+                result.output = "could not start the compile thread";
+        }
+        return result;
+}
+
+static std::string DirName(const std::string& path)
+{
+        size_t slash = path.rfind('/');
+        return slash == std::string::npos ? std::string(".") : slash == 0 ? std::string("/") : path.substr(0, slash);
+}
+
+static void MakeDirs(const std::string& path)
+{
+        for (size_t slash = path.find('/', 1); slash != std::string::npos; slash = path.find('/', slash + 1))
+                mkdir(path.substr(0, slash).c_str(), 0755);
+        mkdir(path.c_str(), 0755);
+}
+
+static std::string getZigCacheDir()
+{
+        std::string dir;
+        if (const char* env = getenv("ZIG_GLOBAL_CACHE_DIR"); env && *env)
+                dir = env;
+        else if (const char* xdg = getenv("XDG_CACHE_HOME"); xdg && *xdg)
+                dir = std::string(xdg) + "/zig";
+        else if (const char* home = getenv("HOME"); home && *home)
+                dir = std::string(home) + "/.cache/zig";
+        else
+                return { };
+        MakeDirs(dir);
+        return dir;
+}
+
+static std::string RealPath(const std::string& path);
+
+struct ZigToolchain
+{
+        std::string exe;
+        std::string libDir;
+};
+
+static CompileSandbox ZigSandbox(const ZigToolchain& zig, std::vector<std::string> read, std::vector<std::string> write, const std::string& tmpDir)
+{
+        std::string cache = getZigCacheDir();
+        read.insert(read.end(), { zig.libDir, RealPath(zig.libDir), DirName(zig.exe) });
+        write.insert(write.end(), { tmpDir, cache });
+        std::vector<std::string> env{ "TMPDIR=" + tmpDir };
+        if (!cache.empty())
+                env.insert(env.end(), { "ZIG_GLOBAL_CACHE_DIR=" + cache, "ZIG_LOCAL_CACHE_DIR=" + cache });
+        return { std::move(read), std::move(write), std::move(env) };
+}
+
 static const std::string& getRustcHash()
 {
         static std::string s_hash;
@@ -2559,14 +2712,31 @@ static const std::string& getRustcHash()
         return s_hash;
 }
 
-static std::string ensureRustRlib(const std::string& sdkPath)
+static const std::string& getRustSysroot()
+{
+        static std::string s_sysroot;
+        static std::chrono::steady_clock::time_point s_nextAttempt{ };
+        auto now = std::chrono::steady_clock::now();
+        if (s_sysroot.empty() && now >= s_nextAttempt)
+        {
+                s_nextAttempt = now + std::chrono::seconds(30);
+                auto result = fx::spawnProgram({ "rustc", "--print", "sysroot" }, 65536, 10000);
+                std::string reason;
+                if (!processFailed(result, reason) && fileExists(result.output + "/bin/rustc"))
+                        s_sysroot = result.output;
+        }
+        return s_sysroot;
+}
+
+static std::string ensureRustRlib(const std::string& sdkPath, std::string& sysroot)
 {
         static std::mutex s_mutex;
         std::lock_guard<std::mutex> lk(s_mutex);
         const std::string& rustcHash = getRustcHash();
-        if (rustcHash.empty())
+        sysroot = getRustSysroot();
+        if (rustcHash.empty() || sysroot.empty())
         {
-                LogError("Failed to run 'rustc -vV', is Rust installed and on PATH?");
+                LogError("Failed to run 'rustc', is Rust installed and on PATH?");
                 return { };
         }
         std::string dir = sdkPath + "/rust-" + hashWithFlags(rustcHash, { &g_rlibFlags });
@@ -2576,10 +2746,10 @@ static std::string ensureRustRlib(const std::string& sdkPath)
                 return rlib;
         mkdir(dir.c_str(), 0700);
         std::string tmp = rlib + ".tmp-" + std::to_string(getpid());
-        std::vector<std::string> args{ "rustc" };
+        std::vector<std::string> args{ sysroot + "/bin/rustc" };
         args.insert(args.end(), g_rlibFlags.begin(), g_rlibFlags.end());
         args.insert(args.end(), { src, "-o", tmp });
-        auto result = fx::spawnProgram(args, 1048576, 120000);
+        auto result = RunSandboxed(args, { { sysroot, sdkPath }, { dir }, { "TMPDIR=" + dir } }, 120000);
         std::string reason;
         if (processFailed(result, reason))
         {
@@ -2624,7 +2794,8 @@ static bool DepsInside(const std::vector<std::string>& deps, const std::string& 
 
 static bool compileRust(const std::string& rsPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& resourceName, const std::string& root)
 {
-        std::string rlib = ensureRustRlib(sdkPath);
+        std::string sysroot;
+        std::string rlib = ensureRustRlib(sdkPath, sysroot);
         if (rlib.empty())
                 return false;
         char tmpl[] = "/tmp/citizen-scripting-wasm-rustc-XXXXXX";
@@ -2634,10 +2805,10 @@ static bool compileRust(const std::string& rsPath, const std::string& wasmPath, 
                 LogError("Failed to create a temporary directory to compile '%s' in resource '%s': %s", rsPath.c_str(), resourceName.c_str(), strerror(errno));
                 return false;
         }
-        std::vector<std::string> args{ "rustc" };
+        std::vector<std::string> args{ sysroot + "/bin/rustc" };
         args.insert(args.end(), g_rustFlags.begin(), g_rustFlags.end());
         args.insert(args.end(), { "--extern", "cfx=" + rlib, rsPath, "--out-dir", outDir, "--emit=link=" + wasmPath + ",dep-info=" + wasmPath + ".d" });
-        auto result = fx::spawnProgram(args, 1048576, 120000);
+        auto result = RunSandboxed(args, { { root, sdkPath, sysroot }, { outDir, DirName(wasmPath) }, { std::string("TMPDIR=") + outDir } }, 120000);
         removeTree(outDir);
         std::string reason;
         if (processFailed(result, reason))
@@ -2787,27 +2958,33 @@ static std::string escapeDep(const std::string& path)
         return out;
 }
 
-static std::string getZigLibDir()
+static ZigToolchain getZigToolchain()
 {
         static std::mutex s_mutex;
-        static std::string s_dir;
+        static ZigToolchain s_zig;
         static std::chrono::steady_clock::time_point s_nextAttempt{ };
         std::lock_guard<std::mutex> lk(s_mutex);
         auto now = std::chrono::steady_clock::now();
-        if (s_dir.empty() && now >= s_nextAttempt)
+        if (s_zig.exe.empty() && now >= s_nextAttempt)
         {
                 s_nextAttempt = now + std::chrono::seconds(30);
                 auto result = fx::spawnProgram({ "zig", "env" }, 65536, 10000);
                 const std::string& out = result.output;
-                size_t key = out.find("lib_dir");
-                size_t sep = key == std::string::npos ? std::string::npos : out.find_first_of(":=", key);
-                size_t open = sep == std::string::npos ? std::string::npos : out.find('"', sep);
-                size_t close = open == std::string::npos ? std::string::npos : out.find('"', open + 1);
+                auto field = [&](const char* name) -> std::string
+                {
+                        size_t key = out.find(name);
+                        size_t sep = key == std::string::npos ? std::string::npos : out.find_first_of(":=", key);
+                        size_t open = sep == std::string::npos ? std::string::npos : out.find('"', sep);
+                        size_t close = open == std::string::npos ? std::string::npos : out.find('"', open + 1);
+                        return close == std::string::npos ? std::string() : out.substr(open + 1, close - open - 1);
+                };
                 std::string reason;
-                if (!processFailed(result, reason) && close != std::string::npos)
-                        s_dir = out.substr(open + 1, close - open - 1);
+                std::string exe = RealPath(field("zig_exe"));
+                std::string libDir = field("lib_dir");
+                if (!processFailed(result, reason) && !exe.empty() && !libDir.empty())
+                        s_zig = { std::move(exe), std::move(libDir) };
         }
-        return s_dir;
+        return s_zig;
 }
 
 static std::string YamlQuote(const std::string& text)
@@ -2841,12 +3018,12 @@ static bool writeCompileOverlay(const std::string& path, std::initializer_list<s
         return fclose(f) == 0 && ok;
 }
 
-static bool scanCppDeps(const std::string& cppPath, const std::string& depFile, const std::string& sdkPath, const std::string& overlay, const std::string& resourceName, std::vector<std::string>& deps)
+static bool scanCppDeps(const std::string& cppPath, const std::string& depFile, const std::string& sdkPath, const std::string& overlay, const std::string& resourceName, const ZigToolchain& zig, const CompileSandbox& sandbox, std::vector<std::string>& deps)
 {
-        std::vector<std::string> args{ "zig", "c++" };
+        std::vector<std::string> args{ zig.exe, "c++" };
         args.insert(args.end(), g_cppFlags.begin(), g_cppFlags.end());
         args.insert(args.end(), { "-ivfsoverlay", overlay, "-I" + sdkPath, "-I" + sdkPath + "/include", "-MM", "-MF", depFile, cppPath });
-        auto result = fx::spawnProgram(args, 1048576, 60000);
+        auto result = RunSandboxed(args, sandbox, 60000);
         std::string reason;
         if (processFailed(result, reason))
         {
@@ -2934,7 +3111,7 @@ static const std::string& getZigHash()
         return s_hash;
 }
 
-static std::string ensureCppPch(const std::string& sdkPath)
+static std::string ensureCppPch(const std::string& sdkPath, const ZigToolchain& zig)
 {
         static std::mutex s_mutex;
         static std::unordered_set<std::string> s_failed;
@@ -2950,10 +3127,10 @@ static std::string ensureCppPch(const std::string& sdkPath)
                 return { };
         mkdir(dir.c_str(), 0700);
         std::string tmp = pch + ".tmp-" + std::to_string(getpid());
-        std::vector<std::string> args{ "zig", "c++" };
+        std::vector<std::string> args{ zig.exe, "c++" };
         args.insert(args.end(), g_cppFlags.begin(), g_cppFlags.end());
         args.insert(args.end(), { "-Wno-unused-command-line-argument", "-x", "c++-header", "-I" + sdkPath, sdkPath + "/include/cfx.h", "-o", tmp });
-        auto result = fx::spawnProgram(args, 1048576, 300000);
+        auto result = RunSandboxed(args, ZigSandbox(zig, { sdkPath }, { dir }, dir), 300000);
         std::string reason;
         if (processFailed(result, reason) || rename(tmp.c_str(), pch.c_str()) != 0)
         {
@@ -2965,7 +3142,7 @@ static std::string ensureCppPch(const std::string& sdkPath)
         return pch;
 }
 
-static bool compileCppSources(const std::string& cppPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& overlay, const std::string& resourceName, const std::string& root)
+static bool compileCppSources(const std::string& cppPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& overlay, const std::string& resourceName, const std::string& root, const ZigToolchain& zig, const CompileSandbox& sandbox)
 {
         std::vector<std::string> sources{ cppPath };
         std::unordered_set<std::string> seenSources{ cppPath };
@@ -2974,7 +3151,7 @@ static bool compileCppSources(const std::string& cppPath, const std::string& was
         for (size_t i = 0; i < sources.size(); ++i)
         {
                 std::vector<std::string> deps;
-                if (!scanCppDeps(sources[i], wasmPath + ".d.tmp", sdkPath, overlay, resourceName, deps) || !DepsInside(deps, root, sdkPath, sources[i], resourceName))
+                if (!scanCppDeps(sources[i], wasmPath + ".d.tmp", sdkPath, overlay, resourceName, zig, sandbox, deps) || !DepsInside(deps, root, sdkPath, sources[i], resourceName))
                         return false;
                 for (const auto& dep : deps)
                 {
@@ -2992,8 +3169,8 @@ static bool compileCppSources(const std::string& cppPath, const std::string& was
                         sources.push_back(helper);
                 }
         }
-        std::string pch = ensureCppPch(sdkPath);
-        std::vector<std::string> args{ "zig", "c++" };
+        std::string pch = ensureCppPch(sdkPath, zig);
+        std::vector<std::string> args{ zig.exe, "c++" };
         args.insert(args.end(), g_cppFlags.begin(), g_cppFlags.end());
         args.insert(args.end(), { "-ivfsoverlay", overlay, "-I" + sdkPath, "-I" + sdkPath + "/include" });
         if (pch.empty())
@@ -3003,7 +3180,7 @@ static bool compileCppSources(const std::string& cppPath, const std::string& was
         args.insert(args.end(), sources.begin(), sources.end());
         args.push_back("-o");
         args.push_back(wasmPath);
-        auto result = fx::spawnProgram(args, 1048576, 300000);
+        auto result = RunSandboxed(args, sandbox, 300000);
         std::string reason;
         if (processFailed(result, reason))
         {
@@ -3033,20 +3210,30 @@ static bool compileCppSources(const std::string& cppPath, const std::string& was
 
 static bool compileCpp(const std::string& cppPath, const std::string& wasmPath, const std::string& sdkPath, const std::string& resourceName, const std::string& root)
 {
-        std::string zigLib = getZigLibDir();
-        if (zigLib.empty())
+        ZigToolchain zig = getZigToolchain();
+        if (zig.exe.empty())
         {
                 LogError("Failed to run 'zig env', is Zig installed and on PATH?");
                 return false;
         }
         std::string overlay = wasmPath + ".vfs.yaml";
-        if (!writeCompileOverlay(overlay, { root, sdkPath, RealPath(sdkPath), zigLib, RealPath(zigLib) }))
+        if (!writeCompileOverlay(overlay, { root, sdkPath, RealPath(sdkPath), zig.libDir, RealPath(zig.libDir) }))
         {
                 unlink(overlay.c_str());
                 LogError("Failed to write the compiler file overlay for '%s' in resource '%s'", cppPath.c_str(), resourceName.c_str());
                 return false;
         }
-        bool ok = compileCppSources(cppPath, wasmPath, sdkPath, overlay, resourceName, root);
+        char tmpl[] = "/tmp/citizen-scripting-wasm-zig-XXXXXX";
+        char* tmpDir = mkdtemp(tmpl);
+        if (!tmpDir)
+        {
+                unlink(overlay.c_str());
+                LogError("Failed to create a temporary directory to compile '%s' in resource '%s': %s", cppPath.c_str(), resourceName.c_str(), strerror(errno));
+                return false;
+        }
+        CompileSandbox sandbox = ZigSandbox(zig, { root, sdkPath }, { DirName(wasmPath) }, tmpDir);
+        bool ok = compileCppSources(cppPath, wasmPath, sdkPath, overlay, resourceName, root, zig, sandbox);
+        removeTree(tmpDir);
         unlink(overlay.c_str());
         return ok;
 }
