@@ -16,6 +16,8 @@ GAME_URLS = {
         "fivem": "https://raw.githubusercontent.com/alloc8or/gta5-nativedb-data/master/natives.json",
         "redm": "https://raw.githubusercontent.com/alloc8or/rdr3-nativedb-data/master/natives.json",
 }
+CFX_GAME_NAMES = {"fivem": "gta5", "redm": "rdr3"}
+SERVER_APISETS = ("server", "shared")
 
 PARAM_TYPE_MAP = {
         "int": "int",
@@ -396,6 +398,17 @@ SCALAR_KINDS = {
 }
 
 
+def native_hash(native: dict) -> int | None:
+        try:
+                return int(native.get("hash", ""), 16)
+        except ValueError:
+                return None
+
+
+def runs_on_server(native: dict, cfx_games: set[str]) -> bool:
+        return native.get("apiset") in SERVER_APISETS and native.get("game") in (None, *cfx_games)
+
+
 def native_type_kinds(native: dict) -> tuple[str, str] | None:
         params = native.get("params", [])
         args = ""
@@ -515,6 +528,9 @@ def main():
                 sys.exit(1)
         def param_sig(native):
                 return tuple(p.get("type", "") for p in native.get("params", []))
+        cfx_games = {CFX_GAME_NAMES[g] for g in games}
+        server_natives = [n for n in cfx_natives if runs_on_server(n, cfx_games)]
+        server_hashes = {native_hash(n) for n in server_natives}
         cfx_ids = {id(n) for n in cfx_natives}
         cfx_names = {n.get("name") for n in cfx_natives}
         global_seen: dict[tuple, tuple[str, tuple[bool, int]]] = {}
@@ -537,7 +553,7 @@ def main():
         rust_owner: dict[str, str] = {}
         rust_wrappers: list[tuple[str, str]] = []
         for ns in sorted(all_ns.keys(), key=lambda n: (n.lower() != "cfx", n)):
-                natives = all_ns[ns]
+                natives = [n for n in all_ns[ns] if native_hash(n) in server_hashes]
                 for name, wrapper in generate_cpp_wrappers(natives):
                         if cpp_owner.setdefault(name, ns) == ns:
                                 cpp_wrappers.append((name, wrapper))
@@ -560,7 +576,7 @@ def main():
         with open(os.path.join(output_dir, "all.rs"), "w") as f:
                 f.write(all_rs + "\n")
 
-        types_h, types_count = generate_type_table(cfx_natives)
+        types_h, types_count = generate_type_table(server_natives)
         with open(os.path.join(output_dir, "types.h"), "w") as f:
                 f.write(types_h)
 
