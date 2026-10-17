@@ -451,6 +451,7 @@ inline void closeInheritedFds(posix_spawn_file_actions_t* actions)
 struct SpawnOptions
 {
         std::vector<std::string> env;
+        bool inheritEnv = true;
         std::function<bool(std::string& error)> beforeSpawn;
 };
 
@@ -480,7 +481,7 @@ inline ProcessResult spawnProcessImpl(const char* path, const char* const* argv,
         std::vector<char*> envp;
         for (const auto& s : envStrs)
         {
-                if (!envOverridden(options, s))
+                if ((!options || options->inheritEnv) && !envOverridden(options, s))
                         envp.push_back(const_cast<char*>(s.data()));
         }
         if (options)

@@ -2640,6 +2640,8 @@ static fx::ProcessResult RunSandboxed(const std::vector<std::string>& args, cons
 {
         fx::SpawnOptions options;
         options.env = sandbox.env;
+        options.env.push_back("PATH=/usr/bin:/bin");
+        options.inheritEnv = false;
         options.beforeSpawn = [&sandbox](std::string& error)
         {
                 return ApplyLandlock(sandbox, error);
