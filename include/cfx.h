@@ -249,6 +249,31 @@ struct MsgpackWriter
 #include <vector>
 #include <functional>
 
+namespace cfx
+{
+
+struct Vector2
+{
+        float x = 0.f, y = 0.f;
+};
+
+struct Vector3
+{
+        float x = 0.f, y = 0.f, z = 0.f;
+};
+
+struct Vector4
+{
+        float x = 0.f, y = 0.f, z = 0.f, w = 0.f;
+};
+
+struct Quaternion
+{
+        float x = 0.f, y = 0.f, z = 0.f, w = 0.f;
+};
+
+}
+
 namespace fxw_internal
 {
 
@@ -266,10 +291,15 @@ struct Value
                 Bin,
                 Array,
                 Object,
-                FuncRef
+                FuncRef,
+                Vector2,
+                Vector3,
+                Vector4,
+                Quaternion
         } kind = Kind::Null;
         bool isIntegral = false;
         int64_t intVal = 0;
+        std::array<float, 4> vec{ };
         union
         {
                 double numVal;
@@ -292,7 +322,7 @@ struct Value
         Value() : numVal(0.0) { }
         ~Value() { if (hasString()) scalar.~basic_string(); }
 
-        Value(const Value& o) : kind(o.kind), isIntegral(o.isIntegral), intVal(o.intVal), children(o.children), keys(o.keys)
+        Value(const Value& o) : kind(o.kind), isIntegral(o.isIntegral), intVal(o.intVal), vec(o.vec), children(o.children), keys(o.keys)
         {
                 if (o.hasString()) new (&scalar) std::string(o.scalar);
                 else if (o.kind == Kind::Bool) boolVal = o.boolVal;
@@ -306,7 +336,7 @@ struct Value
                 return *this;
         }
 
-        Value(Value&& o) noexcept : kind(o.kind), isIntegral(o.isIntegral), intVal(o.intVal), children(std::move(o.children)), keys(std::move(o.keys))
+        Value(Value&& o) noexcept : kind(o.kind), isIntegral(o.isIntegral), intVal(o.intVal), vec(o.vec), children(std::move(o.children)), keys(std::move(o.keys))
         {
                 if (o.hasString())
                 {
@@ -337,6 +367,10 @@ struct Value
                 else numVal = 0.0;
         }
         Value(std::string s) : kind(Kind::String), scalar(std::move(s)) { }
+        Value(const cfx::Vector2& v) : kind(Kind::Vector2), vec{ v.x, v.y, 0.f, 0.f }, numVal(0.0) { }
+        Value(const cfx::Vector3& v) : kind(Kind::Vector3), vec{ v.x, v.y, v.z, 0.f }, numVal(0.0) { }
+        Value(const cfx::Vector4& v) : kind(Kind::Vector4), vec{ v.x, v.y, v.z, v.w }, numVal(0.0) { }
+        Value(const cfx::Quaternion& q) : kind(Kind::Quaternion), vec{ q.x, q.y, q.z, q.w }, numVal(0.0) { }
 
         Value(std::nullopt_t) : Value() { }
 
@@ -409,6 +443,58 @@ struct Value
                 if (kind != Kind::Number)
                         return def;
                 return isIntegral ? intVal : static_cast<int64_t>(numVal);
+        }
+
+        static constexpr size_t components(Kind k)
+        {
+                return k == Kind::Vector2 ? 2 : k == Kind::Vector3 ? 3 : (k == Kind::Vector4 || k == Kind::Quaternion) ? 4 : 0;
+        }
+
+        template<typename V>
+        std::optional<V> toVector() const
+        {
+                constexpr Kind want = std::is_same_v<V, cfx::Vector2> ? Kind::Vector2 : std::is_same_v<V, cfx::Vector3> ? Kind::Vector3 : std::is_same_v<V, cfx::Vector4> ? Kind::Vector4 : Kind::Quaternion;
+                constexpr size_t n = components(want);
+                std::array<float, 4> f{ };
+                if (kind == want)
+                        f = vec;
+                else if (kind == Kind::Array && children.size() == n)
+                {
+                        for (size_t i = 0; i < n; ++i)
+                        {
+                                if (children[i].kind != Kind::Number)
+                                        return std::nullopt;
+                                f[i] = static_cast<float>(children[i].numVal);
+                        }
+                }
+                else
+                        return std::nullopt;
+                if constexpr (n == 2)
+                        return V{ f[0], f[1] };
+                else if constexpr (n == 3)
+                        return V{ f[0], f[1], f[2] };
+                else
+                        return V{ f[0], f[1], f[2], f[3] };
+        }
+
+        cfx::Vector2 asVector2(cfx::Vector2 def = { }) const
+        {
+                return toVector<cfx::Vector2>().value_or(def);
+        }
+
+        cfx::Vector3 asVector3(cfx::Vector3 def = { }) const
+        {
+                return toVector<cfx::Vector3>().value_or(def);
+        }
+
+        cfx::Vector4 asVector4(cfx::Vector4 def = { }) const
+        {
+                return toVector<cfx::Vector4>().value_or(def);
+        }
+
+        cfx::Quaternion asQuaternion(cfx::Quaternion def = { }) const
+        {
+                return toVector<cfx::Quaternion>().value_or(def);
         }
 
         bool asBool(bool def = false) const
@@ -503,6 +589,7 @@ struct Value
                 kind = o.kind;
                 isIntegral = o.isIntegral;
                 intVal = o.intVal;
+                vec = o.vec;
                 children = std::move(o.children);
                 keys = std::move(o.keys);
                 m_keyIndex.reset();
@@ -618,6 +705,16 @@ struct Reader
                         Value v;
                         v.kind = Value::Kind::FuncRef;
                         v.initScalar(str(n));
+                        return v;
+                }
+                Value::Kind vectorKind = t == 20 ? Value::Kind::Vector2 : t == 21 ? Value::Kind::Vector3 : t == 22 ? Value::Kind::Vector4 : t == 23 ? Value::Kind::Quaternion : Value::Kind::Null;
+                size_t count = Value::components(vectorKind);
+                if (count && n == count * 4 && n <= static_cast<size_t>(end - p))
+                {
+                        Value v;
+                        v.kind = vectorKind;
+                        for (size_t i = 0; i < count; ++i, p += 4)
+                                v.vec[i] = std::bit_cast<float>(static_cast<uint32_t>(p[0]) | static_cast<uint32_t>(p[1]) << 8 | static_cast<uint32_t>(p[2]) << 16 | static_cast<uint32_t>(p[3]) << 24);
                         return v;
                 }
                 if (n > static_cast<size_t>(end - p))
@@ -901,6 +998,39 @@ struct Writer : cfx::MsgpackWriter
                                                 encNull();
                                 }
                                 break;
+                        case Value::Kind::Vector2:
+                                encVector(20, v.vec, 2);
+                                break;
+                        case Value::Kind::Vector3:
+                                encVector(21, v.vec, 3);
+                                break;
+                        case Value::Kind::Vector4:
+                                encVector(22, v.vec, 4);
+                                break;
+                        case Value::Kind::Quaternion:
+                                encVector(23, v.vec, 4);
+                                break;
+                }
+        }
+
+        void encVector(uint8_t type, const std::array<float, 4>& vec, size_t count)
+        {
+                size_t size = count * 4;
+                if (size == 8)
+                        pu8(0xD7);
+                else if (size == 16)
+                        pu8(0xD8);
+                else
+                {
+                        pu8(0xC7);
+                        pu8(static_cast<uint8_t>(size));
+                }
+                pu8(type);
+                for (size_t i = 0; i < count; ++i)
+                {
+                        uint32_t bits = std::bit_cast<uint32_t>(vec[i]);
+                        for (int shift = 0; shift < 32; shift += 8)
+                                pu8(static_cast<uint8_t>(bits >> shift));
                 }
         }
 };
@@ -934,6 +1064,8 @@ inline void encodeOne(Writer& w, T&& v)
                 w.encBool(v);
         else if constexpr (std::is_same_v<D, Value>)
                 w.encValue(v);
+        else if constexpr (std::is_same_v<D, cfx::Vector2> || std::is_same_v<D, cfx::Vector3> || std::is_same_v<D, cfx::Vector4> || std::is_same_v<D, cfx::Quaternion>)
+                w.encValue(Value(v));
         else if constexpr (std::is_floating_point_v<D>)
                 w.encDouble((double)v);
         else if constexpr (std::is_unsigned_v<D> && sizeof(D) == 8)
@@ -1499,6 +1631,31 @@ inline void stringifyTo(std::string& out, const Value& v)
                 case Value::Kind::Bin:
                         out += "null";
                         break;
+                case Value::Kind::Vector2:
+                case Value::Kind::Vector3:
+                case Value::Kind::Vector4:
+                case Value::Kind::Quaternion:
+                {
+                        static constexpr const char* names[] = { "x", "y", "z", "w" };
+                        out += '{';
+                        for (size_t i = 0; i < Value::components(v.kind); ++i)
+                        {
+                                if (i > 0)
+                                        out += ',';
+                                out += quote(names[i]);
+                                out += ':';
+                                if (std::isfinite(v.vec[i]))
+                                {
+                                        char buf[32];
+                                        snprintf(buf, sizeof(buf), "%.9g", static_cast<double>(v.vec[i]));
+                                        out += buf;
+                                }
+                                else
+                                        out += "null";
+                        }
+                        out += '}';
+                        break;
+                }
                 case Value::Kind::Array:
                         out += '[';
                         for (size_t i = 0; i < v.children.size(); ++i)
@@ -1578,11 +1735,6 @@ struct NativeArg
         {
                 return ptr((const void*)p);
         }
-};
-
-struct Vector3
-{
-        float x = 0.f, y = 0.f, z = 0.f;
 };
 
 class EventArgs
@@ -1821,6 +1973,17 @@ bool decodeValue(const json::Value& v, T& out, std::string& reason)
                 if (!decodeValue(v, inner, reason))
                         return false;
                 out = std::move(inner);
+                return true;
+        }
+        else if constexpr (std::is_same_v<T, Vector2> || std::is_same_v<T, Vector3> || std::is_same_v<T, Vector4> || std::is_same_v<T, Quaternion>)
+        {
+                auto vec = v.toVector<T>();
+                if (!vec)
+                {
+                        reason = std::is_same_v<T, Quaternion> ? std::string("expected quaternion") : "expected vector" + std::to_string(sizeof(T) / sizeof(float));
+                        return false;
+                }
+                out = *vec;
                 return true;
         }
         else

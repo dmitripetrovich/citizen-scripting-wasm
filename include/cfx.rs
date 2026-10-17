@@ -115,15 +115,36 @@ extern "C" {
         fn __cfx_is_manifest_version_v2_between(lower: *const u8, lower_len: u32, upper: *const u8, upper_len: u32) -> i32;
 }
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Vector2 {
+        pub x: f32,
+        pub y: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vector3 {
         pub x: f32,
         pub y: f32,
         pub z: f32,
 }
 
-impl Default for Vector3 {
-        fn default() -> Self { Self { x: 0.0, y: 0.0, z: 0.0 } }
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Vector4 {
+        pub x: f32,
+        pub y: f32,
+        pub z: f32,
+        pub w: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Quaternion {
+        pub x: f32,
+        pub y: f32,
+        pub z: f32,
+        pub w: f32,
 }
 
 #[repr(C)]
@@ -164,6 +185,10 @@ pub enum Value {
         Array(Vec<Value>),
         Object(Vec<(String, Value)>),
         FuncRef(String),
+        Vector2(Vector2),
+        Vector3(Vector3),
+        Vector4(Vector4),
+        Quaternion(Quaternion),
 }
 
 static NULL_VALUE: Value = Value::Null;
@@ -239,6 +264,34 @@ impl Value {
         pub fn func_ref_str(&self) -> &str {
                 match self { Value::FuncRef(s) => s, _ => "" }
         }
+        fn components(&self, n: usize, quaternion: bool) -> Option<[f32; 4]> {
+                match (self, n, quaternion) {
+                        (Value::Vector2(v), 2, false) => Some([v.x, v.y, 0.0, 0.0]),
+                        (Value::Vector3(v), 3, false) => Some([v.x, v.y, v.z, 0.0]),
+                        (Value::Vector4(v), 4, false) => Some([v.x, v.y, v.z, v.w]),
+                        (Value::Quaternion(q), 4, true) => Some([q.x, q.y, q.z, q.w]),
+                        (Value::Array(items), _, _) if items.len() == n => {
+                                let mut out = [0.0f32; 4];
+                                for (slot, item) in out.iter_mut().zip(items) {
+                                        *slot = match item { Value::Int(i) => *i as f32, Value::Float(f) => *f as f32, _ => return None };
+                                }
+                                Some(out)
+                        }
+                        _ => None,
+                }
+        }
+        pub fn as_vector2(&self) -> Vector2 {
+                self.components(2, false).map_or_else(Vector2::default, |c| Vector2 { x: c[0], y: c[1] })
+        }
+        pub fn as_vector3(&self) -> Vector3 {
+                self.components(3, false).map_or_else(Vector3::default, |c| Vector3 { x: c[0], y: c[1], z: c[2] })
+        }
+        pub fn as_vector4(&self) -> Vector4 {
+                self.components(4, false).map_or_else(Vector4::default, |c| Vector4 { x: c[0], y: c[1], z: c[2], w: c[3] })
+        }
+        pub fn as_quaternion(&self) -> Quaternion {
+                self.components(4, true).map_or_else(Quaternion::default, |c| Quaternion { x: c[0], y: c[1], z: c[2], w: c[3] })
+        }
 }
 
 impl From<i8> for Value { fn from(v: i8) -> Self { Value::Int(v as i64) } }
@@ -263,6 +316,10 @@ impl From<&str> for Value { fn from(v: &str) -> Self { Value::String(v.to_string
 impl From<String> for Value { fn from(v: String) -> Self { Value::String(v) } }
 impl From<()> for Value { fn from(_: ()) -> Self { Value::Null } }
 impl From<&Value> for Value { fn from(v: &Value) -> Self { v.clone() } }
+impl From<Vector2> for Value { fn from(v: Vector2) -> Self { Value::Vector2(v) } }
+impl From<Vector3> for Value { fn from(v: Vector3) -> Self { Value::Vector3(v) } }
+impl From<Vector4> for Value { fn from(v: Vector4) -> Self { Value::Vector4(v) } }
+impl From<Quaternion> for Value { fn from(q: Quaternion) -> Self { Value::Quaternion(q) } }
 
 pub trait IntoArgs {
         fn into_args(self) -> Vec<Value>;
@@ -278,7 +335,7 @@ impl<const N: usize> IntoArgs for &[Value; N] { fn into_args(self) -> Vec<Value>
 macro_rules! impl_single_into_args {
         ($($t:ty),*) => { $(impl IntoArgs for $t { fn into_args(self) -> Vec<Value> { vec![self.into()] } })* };
 }
-impl_single_into_args!(Value, bool, i8, i16, i32, i64, u8, u16, u32, u64, isize, usize, f32, f64, String, &str);
+impl_single_into_args!(Value, bool, i8, i16, i32, i64, u8, u16, u32, u64, isize, usize, f32, f64, String, &str, Vector2, Vector3, Vector4, Quaternion);
 
 macro_rules! impl_tuple_into_args {
         ($($t:ident $i:tt),+) => {
@@ -381,7 +438,21 @@ impl MsgpackWriter {
                                 self.pu8(10);
                                 self.buf.extend_from_slice(s.as_bytes());
                         }
+                        Value::Vector2(v) => self.enc_vector(20, &[v.x, v.y]),
+                        Value::Vector3(v) => self.enc_vector(21, &[v.x, v.y, v.z]),
+                        Value::Vector4(v) => self.enc_vector(22, &[v.x, v.y, v.z, v.w]),
+                        Value::Quaternion(q) => self.enc_vector(23, &[q.x, q.y, q.z, q.w]),
                 }
+        }
+
+        fn enc_vector(&mut self, ext_type: u8, components: &[f32]) {
+                match components.len() * 4 {
+                        8 => self.pu8(0xD7),
+                        16 => self.pu8(0xD8),
+                        size => { self.pu8(0xC7); self.pu8(size as u8); }
+                }
+                self.pu8(ext_type);
+                for c in components { self.buf.extend_from_slice(&c.to_le_bytes()); }
         }
 }
 
@@ -460,8 +531,16 @@ impl<'a> MsgpackReader<'a> {
                 if t == 10 {
                         return Value::FuncRef(self.read_str(n));
                 }
-                let _ = self.bytes(n);
-                Value::Null
+                let data = self.bytes(n);
+                let count = match t { 20 => 2, 21 => 3, 22 | 23 => 4, _ => 0 };
+                if count == 0 || data.len() != count * 4 { return Value::Null; }
+                let c: Vec<f32> = data.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+                match t {
+                        20 => Value::Vector2(Vector2 { x: c[0], y: c[1] }),
+                        21 => Value::Vector3(Vector3 { x: c[0], y: c[1], z: c[2] }),
+                        22 => Value::Vector4(Vector4 { x: c[0], y: c[1], z: c[2], w: c[3] }),
+                        _ => Value::Quaternion(Quaternion { x: c[0], y: c[1], z: c[2], w: c[3] }),
+                }
         }
 
         fn read(&mut self, depth: i32) -> Value {
@@ -2022,6 +2101,10 @@ pub mod json {
                         Value::Int(n) => out.push_str(&n.to_string()),
                         Value::Float(f) => out.push_str(&format_number(*f)),
                         Value::String(s) | Value::FuncRef(s) => out.push_str(&quote(s)),
+                        Value::Vector2(v) => stringify_components(out, &[v.x, v.y]),
+                        Value::Vector3(v) => stringify_components(out, &[v.x, v.y, v.z]),
+                        Value::Vector4(v) => stringify_components(out, &[v.x, v.y, v.z, v.w]),
+                        Value::Quaternion(q) => stringify_components(out, &[q.x, q.y, q.z, q.w]),
                         Value::Array(items) => {
                                 out.push('[');
                                 for (i, item) in items.iter().enumerate() {
@@ -2041,6 +2124,17 @@ pub mod json {
                                 out.push('}');
                         }
                 }
+        }
+
+        fn stringify_components(out: &mut String, components: &[f32]) {
+                out.push('{');
+                for (i, (name, c)) in ["x", "y", "z", "w"].iter().zip(components).enumerate() {
+                        if i > 0 { out.push(','); }
+                        out.push_str(&quote(name));
+                        out.push(':');
+                        if c.is_finite() { out.push_str(&c.to_string()); } else { out.push_str("null"); }
+                }
+                out.push('}');
         }
 
         pub fn stringify(v: &Value) -> String {
@@ -2167,6 +2261,30 @@ impl FromArg for String {
 
 impl FromArg for Value {
         fn from_arg(v: &Value) -> Result<Self, String> { Ok(v.clone()) }
+}
+
+impl FromArg for Vector2 {
+        fn from_arg(v: &Value) -> Result<Self, String> {
+                v.components(2, false).map(|c| Vector2 { x: c[0], y: c[1] }).ok_or_else(|| "expected vector2".to_string())
+        }
+}
+
+impl FromArg for Vector3 {
+        fn from_arg(v: &Value) -> Result<Self, String> {
+                v.components(3, false).map(|c| Vector3 { x: c[0], y: c[1], z: c[2] }).ok_or_else(|| "expected vector3".to_string())
+        }
+}
+
+impl FromArg for Vector4 {
+        fn from_arg(v: &Value) -> Result<Self, String> {
+                v.components(4, false).map(|c| Vector4 { x: c[0], y: c[1], z: c[2], w: c[3] }).ok_or_else(|| "expected vector4".to_string())
+        }
+}
+
+impl FromArg for Quaternion {
+        fn from_arg(v: &Value) -> Result<Self, String> {
+                v.components(4, true).map(|c| Quaternion { x: c[0], y: c[1], z: c[2], w: c[3] }).ok_or_else(|| "expected quaternion".to_string())
+        }
 }
 
 impl<T: FromArg> FromArg for Option<T> {
