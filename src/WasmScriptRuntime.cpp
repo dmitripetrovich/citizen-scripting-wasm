@@ -3122,6 +3122,13 @@ static const std::string& getZigHash()
         return s_hash;
 }
 
+static std::string SdkStampDefine(const std::string& sdkPath)
+{
+        struct stat st;
+        uint64_t stamp = stat((sdkPath + "/include/cfx.h").c_str(), &st) == 0 ? static_cast<uint64_t>(st.st_mtim.tv_sec) * 1000000000ULL + static_cast<uint64_t>(st.st_mtim.tv_nsec) : 0;
+        return "-DCFX_SDK_STAMP=" + std::to_string(stamp);
+}
+
 static std::string ensureCppPch(const std::string& sdkPath, const ZigToolchain& zig)
 {
         static std::mutex s_mutex;
@@ -3140,7 +3147,7 @@ static std::string ensureCppPch(const std::string& sdkPath, const ZigToolchain& 
         std::string tmp = pch + ".tmp-" + std::to_string(getpid());
         std::vector<std::string> args{ zig.exe, "c++" };
         args.insert(args.end(), g_cppFlags.begin(), g_cppFlags.end());
-        args.insert(args.end(), { "-Wno-unused-command-line-argument", "-x", "c++-header", "-I" + sdkPath, sdkPath + "/include/cfx.h", "-o", tmp });
+        args.insert(args.end(), { "-Wno-unused-command-line-argument", SdkStampDefine(sdkPath), "-x", "c++-header", "-I" + sdkPath, sdkPath + "/include/cfx.h", "-o", tmp });
         auto result = RunSandboxed(args, ZigSandbox(zig, { sdkPath }, { dir }, dir), 300000);
         std::string reason;
         if (processFailed(result, reason) || rename(tmp.c_str(), pch.c_str()) != 0)
@@ -3187,7 +3194,7 @@ static bool compileCppSources(const std::string& cppPath, const std::string& was
         if (pch.empty())
                 args.insert(args.end(), { "-include", sdkPath + "/include/cfx.h" });
         else
-                args.insert(args.end(), { "-include-pch", pch });
+                args.insert(args.end(), { SdkStampDefine(sdkPath), "-include-pch", pch });
         args.insert(args.end(), sources.begin(), sources.end());
         args.push_back("-o");
         args.push_back(wasmPath);
