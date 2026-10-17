@@ -948,18 +948,19 @@ fn noop_waker() -> Waker {
 }
 
 fn resume_coroutine_by_id(id: i32) {
-        unsafe { *CORO_WAIT_MS.get() = 0; }
         let c = ctx();
         let mut entry = match unsafe { (*c).coroutines.remove(&id) } {
                 Some(e) => e,
                 None => return,
         };
+        let outer_wait_ms = unsafe { std::mem::replace(&mut *CORO_WAIT_MS.get(), 0) };
         let waker = noop_waker();
         let mut cx = core::task::Context::from_waker(&waker);
-        match entry.future.as_mut().poll(&mut cx) {
+        let poll = entry.future.as_mut().poll(&mut cx);
+        let wait_ms = unsafe { std::mem::replace(&mut *CORO_WAIT_MS.get(), outer_wait_ms) };
+        match poll {
                 Poll::Ready(()) => {}
                 Poll::Pending => {
-                        let wait_ms = unsafe { *CORO_WAIT_MS.get() };
                         let now = unsafe { (*c).now_ms() };
                         entry.resume_at = if wait_ms > 0 { now + wait_ms as u64 } else { now };
                         unsafe { (*c).earliest_resume = (*c).earliest_resume.min(entry.resume_at) };
