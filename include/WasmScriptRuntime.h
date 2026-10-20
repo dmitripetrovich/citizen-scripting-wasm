@@ -84,6 +84,11 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
                 return m_metadataHost.GetRef();
         }
 
+        int64_t memoryLimit() const
+        {
+                return m_memoryLimit;
+        }
+
         IScriptHostWithManifest* manifestHost() const
         {
                 return m_manifestHost.GetRef();
@@ -157,6 +162,7 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         int32_t m_instanceId = 0;
         bool m_destroyed = false;
         std::string m_resourceName;
+        int64_t m_memoryLimit = 256 * 1024 * 1024;
         WasmModule* m_activeModule = nullptr;
         std::unordered_map<int32_t, fx::RefCallback> m_refs;
         std::unordered_map<int32_t, int32_t> m_refCounts;

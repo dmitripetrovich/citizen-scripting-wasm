@@ -32,6 +32,7 @@ static std::mutex s_instanceIdMutex;
 static std::unordered_set<int32_t> s_activeInstanceIds;
 
 static constexpr int64_t WASM_MEMORY_LIMIT = 256 * 1024 * 1024;
+static constexpr int64_t WASM_MEMORY_LIMIT_MAX = 4LL * 1024 * 1024 * 1024;
 static constexpr uint64_t WASM_FUEL_AMOUNT = 1000000000ULL;
 static constexpr uint32_t RESULT_BUF_SIZE = 65536;
 static constexpr int EPOCH_TICK_MS = 10;
@@ -1236,11 +1237,11 @@ static wasmtime_error_t* WorkerEpochCallback(wasmtime_context_t*, void* env, uin
         return nullptr;
 }
 
-static void RunWorker(std::shared_ptr<WasmScriptRuntime::WorkerState> state, wasmtime_module_t* mod, std::string fnName, std::vector<char> inputData)
+static void RunWorker(std::shared_ptr<WasmScriptRuntime::WorkerState> state, wasmtime_module_t* mod, std::string fnName, std::vector<char> inputData, int64_t memoryLimit)
 {
         auto* eng = WasmScriptRuntime::engine();
         auto* store = wasmtime_store_new(eng, nullptr, nullptr);
-        wasmtime_store_limiter(store, WASM_MEMORY_LIMIT, -1, -1, -1, -1);
+        wasmtime_store_limiter(store, memoryLimit, -1, -1, -1, -1);
         wasmtime_context_set_fuel(wasmtime_store_context(store), UINT64_MAX);
         wasmtime_context_set_epoch_deadline(wasmtime_store_context(store), 1);
         wasmtime_store_epoch_deadline_callback(store, WorkerEpochCallback, state.get(), nullptr);
@@ -1407,7 +1408,7 @@ static wasm_trap_t* CbCreateWorker(void* env, wasmtime_caller_t* caller, const w
         wasmtime_module_t* workerModule = wasmtime_module_clone(mod->module);
         try
         {
-                state->thread = std::thread(RunWorker, state, workerModule, std::move(fnName), std::move(inputData));
+                state->thread = std::thread(RunWorker, state, workerModule, std::move(fnName), std::move(inputData), rt->memoryLimit());
         }
         catch (...)
         {
@@ -1524,6 +1525,16 @@ result_t OM_DECL WasmScriptRuntime::Create(IScriptHost* host)
                 char* name = nullptr;
                 if (FX_SUCCEEDED(md->GetResourceName(&name)) && name)
                         m_resourceName = name;
+                char* limit = nullptr;
+                if (FX_SUCCEEDED(md->GetResourceMetaData(const_cast<char*>("wasm_memory_limit_mb"), 0, &limit)) && limit)
+                {
+                        int64_t mb = std::strtoll(limit, nullptr, 10);
+                        if (mb > 0)
+                        {
+                                m_memoryLimit = std::clamp<int64_t>(mb * 1024 * 1024, WASM_MEMORY_LIMIT, WASM_MEMORY_LIMIT_MAX);
+                                LogInfo("Resource '%s' may use up to %lld MB of memory", m_resourceName.c_str(), (long long)(m_memoryLimit / (1024 * 1024)));
+                        }
+                }
         }
         fx::OMPtr<IScriptHostWithManifest> mh;
         if (FX_SUCCEEDED(m_host.As(&mh)) && mh.GetRef())
@@ -1989,7 +2000,7 @@ result_t WasmScriptRuntime::loadWasm(wasmtime_module_t* module, const std::strin
         mod->scriptFile = scriptFile;
         mod->bookmarkSlot = m_nextBookmarkSlot++;
         mod->store = wasmtime_store_new(engine(), mod.get(), nullptr);
-        wasmtime_store_limiter(mod->store, WASM_MEMORY_LIMIT, -1, -1, -1, -1);
+        wasmtime_store_limiter(mod->store, m_memoryLimit, -1, -1, -1, -1);
         mod->linker = wasmtime_linker_new(engine());
         wasmtime_linker_allow_shadowing(mod->linker, true);
         {

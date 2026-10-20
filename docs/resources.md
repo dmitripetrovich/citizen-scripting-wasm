@@ -144,6 +144,22 @@ Server! {
 
 Helpers can use the SDK and can include or declare further helpers. Editing a helper rebuilds every entry file that uses it.
 
+### Memory
+
+Each resource gets 256MB of linear memory.
+
+One that needs more asks for it in its `fxmanifest.lua`, in megabytes, up to 4096 (all wasm32 can address):
+
+```lua
+wasm_memory_limit_mb '3072'
+```
+
+The limit covers the resource's own workers too. The console shows this when a resource raised it:
+
+```
+[    c-scripting-wasm] Resource 'server_culling' may use up to 3072 MB of memory
+```
+
 ### Caching and pre-compiling
 
 The compiled `.wasm` is cached next to the source and only rebuilt when the source or anything it uses changes.
