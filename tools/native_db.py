@@ -11,6 +11,8 @@ from collections import defaultdict
 CACHE_DIR = os.path.join(os.path.dirname(__file__), ".cache")
 CACHE_TTL = 3600
 
+EXTRA_DIR = os.path.join(os.path.dirname(__file__), "natives_extra")
+
 CFX_URL = "https://runtime.fivem.net/doc/natives_cfx.json"
 GAME_URLS = {
         "fivem": "https://raw.githubusercontent.com/alloc8or/gta5-nativedb-data/master/natives.json",
@@ -495,6 +497,7 @@ def main():
         parser.add_argument("--embed", default="src/sdk.blob")
         parser.add_argument("--no-cache", action="store_true")
         parser.add_argument("--embed-only", action="store_true")
+        parser.add_argument("--extra", action="append", default=[], metavar="NAME")
         args = parser.parse_args()
         base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         if args.embed_only:
@@ -516,6 +519,25 @@ def main():
         if not cfx_natives:
                 print("The native type table needs the CFX natives")
                 sys.exit(1)
+        for name in args.extra:
+                path = os.path.join(EXTRA_DIR, name + ".json")
+                if not os.path.isfile(path):
+                        available = sorted(f[:-5] for f in os.listdir(EXTRA_DIR) if f.endswith(".json")) if os.path.isdir(EXTRA_DIR) else []
+                        print(f"No natives_extra/{name}.json (available: {', '.join(available) or 'none'})")
+                        sys.exit(1)
+                with open(path) as f:
+                        extra = parse_cfx_natives(json.load(f))
+                known = {native_hash(n) for n in cfx_natives}
+                count = 0
+                for ns, natives in extra.items():
+                        for native in natives:
+                                if native_hash(native) in known:
+                                        print(f"{name}: {native.get('name')} is already a CFX native, skipping")
+                                        continue
+                                all_ns.setdefault(ns, []).append(native)
+                                cfx_natives.append(native)
+                                count += 1
+                print(f"Added {count} natives from natives_extra/{name}.json")
         for game in games:
                 try:
                         game_data = fetch_json(GAME_URLS[game], no_cache)

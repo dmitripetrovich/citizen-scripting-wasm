@@ -2,9 +2,10 @@
 set -euo pipefail
 
 usage() {
-        echo "Usage: tools/ci/deploy [--fivem] [--redm] [--cpp] [--rust] [--both | --runtime-only]"
+        echo "Usage: tools/ci/deploy [--fivem] [--redm] [--extra-natives NAME] [--cpp] [--rust] [--both | --runtime-only]"
         echo ""
         echo "  --fivem, --redm Generate natives for these games (default: --fivem)"
+        echo "  --extra-natives NAME Add extra natives in tools/natives_extra/NAME.json"
         echo "  --cpp Deploy the C++ part of the example resource"
         echo "  --rust Deploy the Rust part of the example resource"
         echo "  --both Deploy the whole example resource (same as --cpp --rust)"
@@ -14,11 +15,22 @@ usage() {
 }
 
 GAME_ARGS=()
+EXTRA_ARGS=()
 want_cpp=false
 want_rust=false
 runtime_only=false
-for arg in "$@"; do
+while [ $# -gt 0 ]; do
+        arg="$1"
+        shift
         case "$arg" in
+                --extra-natives)
+                        if [ $# -eq 0 ]; then
+                                echo "--extra-natives needs a name" >&2
+                                exit 1
+                        fi
+                        EXTRA_ARGS+=(--extra "$1")
+                        shift
+                        ;;
                 --fivem) GAME_ARGS+=(fivem) ;;
                 --redm) GAME_ARGS+=(redm) ;;
                 --cpp) want_cpp=true ;;
@@ -69,7 +81,7 @@ BUILD_DIR="$PROJECT_DIR/build"
 
 cd "$PROJECT_DIR"
 
-python3 tools/native_db.py --game "${GAME_ARGS[@]}" --embed src/sdk.blob
+python3 tools/native_db.py --game "${GAME_ARGS[@]}" ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"} --embed src/sdk.blob
 
 rm -rf "$BUILD_DIR"
 
