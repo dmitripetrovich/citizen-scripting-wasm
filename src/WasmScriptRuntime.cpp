@@ -38,6 +38,7 @@ static constexpr uint32_t RESULT_BUF_SIZE = 65536;
 static constexpr int EPOCH_TICK_MS = 10;
 static constexpr uint64_t WASM_CALL_TIMEOUT_TICKS = 5000 / EPOCH_TICK_MS;
 static constexpr int WORKER_STOP_TIMEOUT_MS = 1000;
+static constexpr size_t WASM_MAX_RELOADS_PER_MINUTE = 3;
 
 static std::string GetResourcePath(IScriptHost* host, const std::string& name)
 {
@@ -1535,6 +1536,13 @@ result_t OM_DECL WasmScriptRuntime::Create(IScriptHost* host)
                                 LogInfo("Resource '%s' may use up to %lld MB of memory", m_resourceName.c_str(), (long long)(m_memoryLimit / (1024 * 1024)));
                         }
                 }
+                char* reload = nullptr;
+                if (FX_SUCCEEDED(md->GetResourceMetaData(const_cast<char*>("wasm_reload_on_trap"), 0, &reload)) && reload)
+                {
+                        std::string value = reload;
+                        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                        m_reloadOnTrap = !(value == "no" || value == "off" || value == "false" || value == "0");
+                }
         }
         fx::OMPtr<IScriptHostWithManifest> mh;
         if (FX_SUCCEEDED(m_host.As(&mh)) && mh.GetRef())
@@ -1678,7 +1686,7 @@ size_t WasmModule::wasmMemSize()
 
 bool WasmModule::call(const wasmtime_func_t& fn, const wasmtime_val_t* args, size_t nargs, wasmtime_val_t* results, size_t nresults, const char* label)
 {
-        if (!store)
+        if (!store || faulted)
                 return false;
         bool nested = callDepth > 0;
         if (!nested)
@@ -1695,6 +1703,8 @@ bool WasmModule::call(const wasmtime_func_t& fn, const wasmtime_val_t* args, siz
         bool ok = WasmCall(store, fn, args, nargs, results, nresults, rt->resourceName().c_str(), label, nested, &hitLimit);
         if (hitLimit)
                 limitExceeded = true;
+        if (!ok && rt->m_reloadOnTrap)
+                faulted = true;
         rt->m_activeModule = prev;
         --callDepth;
         if (!ok && !nested)
@@ -1998,6 +2008,7 @@ result_t WasmScriptRuntime::loadWasm(wasmtime_module_t* module, const std::strin
         mod->rt = this;
         mod->module = module;
         mod->scriptFile = scriptFile;
+        mod->sourcePath = sourcePath;
         mod->bookmarkSlot = m_nextBookmarkSlot++;
         mod->store = wasmtime_store_new(engine(), mod.get(), nullptr);
         wasmtime_store_limiter(mod->store, m_memoryLimit, -1, -1, -1, -1);
@@ -2041,17 +2052,54 @@ result_t WasmScriptRuntime::loadWasm(wasmtime_module_t* module, const std::strin
         return FX_S_OK;
 }
 
+void WasmScriptRuntime::reloadFaultedModules()
+{
+        if (m_activeModule || m_destroyed)
+                return;
+        std::vector<std::shared_ptr<WasmModule>> faulted;
+        for (auto& mod : m_modules)
+        {
+                if (mod->faulted && mod->callDepth == 0 && mod->store)
+                        faulted.push_back(mod);
+        }
+        if (faulted.empty())
+                return;
+        auto now = std::chrono::steady_clock::now();
+        std::erase_if(m_reloads, [&](const auto& at) { return now - at >= std::chrono::minutes(1); });
+        for (auto& mod : faulted)
+        {
+                std::string scriptFile = mod->scriptFile;
+                std::string sourcePath = mod->sourcePath;
+                bool allowed = m_reloads.size() < WASM_MAX_RELOADS_PER_MINUTE;
+                wasmtime_module_t* module = allowed && mod->module ? wasmtime_module_clone(mod->module) : nullptr;
+                std::erase(m_modules, mod);
+                destroyModule(*mod);
+                if (!allowed)
+                {
+                        ScriptPrint(m_host.GetRef(), m_resourceName, "^1SCRIPT ERROR: @" + m_resourceName + "/" + scriptFile + " crashed " + std::to_string(WASM_MAX_RELOADS_PER_MINUTE) + " times in a minute and won't be reloaded again; restart the resource to run it^7");
+                        continue;
+                }
+                if (!module)
+                        continue;
+                m_reloads.push_back(now);
+                ScriptPrint(m_host.GetRef(), m_resourceName, "^3@" + m_resourceName + "/" + scriptFile + ": reloading after a crash^7");
+                if (loadWasm(module, scriptFile, sourcePath) != FX_S_OK)
+                        ScriptPrint(m_host.GetRef(), m_resourceName, "^1SCRIPT ERROR: @" + m_resourceName + "/" + scriptFile + " couldn't be reloaded; restart the resource to run it^7");
+        }
+}
+
 result_t OM_DECL WasmScriptRuntime::Tick()
 {
         g_serverTicking.store(true, std::memory_order_relaxed);
         drainPendingLoads();
+        reloadFaultedModules();
         if (m_modules.empty())
                 return FX_S_OK;
         auto modules = m_modules;
         fx::PushEnvironment env(static_cast<IScriptRuntime*>(this));
         for (auto& mod : modules)
         {
-                if (!mod->hasTickFn || !mod->store)
+                if (!mod->hasTickFn || !mod->store || mod->faulted)
                         continue;
                 if (mod->hasHasPendingWorkFn)
                 {
@@ -2070,6 +2118,7 @@ result_t OM_DECL WasmScriptRuntime::Tick()
 
 result_t OM_DECL WasmScriptRuntime::TickBookmarks(uint64_t* bookmarks, int32_t numBookmarks)
 {
+        reloadFaultedModules();
         if (numBookmarks <= 0 || m_modules.empty())
                 return FX_S_OK;
         auto modules = m_modules;

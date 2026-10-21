@@ -163,6 +163,8 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         bool m_destroyed = false;
         std::string m_resourceName;
         int64_t m_memoryLimit = 256 * 1024 * 1024;
+        bool m_reloadOnTrap = true;
+        std::vector<std::chrono::steady_clock::time_point> m_reloads;
         WasmModule* m_activeModule = nullptr;
         std::unordered_map<int32_t, fx::RefCallback> m_refs;
         std::unordered_map<int32_t, int32_t> m_refCounts;
@@ -213,6 +215,7 @@ class WasmScriptRuntime final : public fx::OMClass<WasmScriptRuntime, IScriptRun
         bool resolveExports(WasmModule& mod);
         void destroyModule(WasmModule& mod);
         void destroyWorkers();
+        void reloadFaultedModules();
         result_t loadWasm(wasmtime_module_t* module, const std::string& scriptFile, const std::string& sourcePath);
 };
 
@@ -220,6 +223,7 @@ struct WasmModule : std::enable_shared_from_this<WasmModule>
 {
         WasmScriptRuntime* rt = nullptr;
         std::string scriptFile;
+        std::string sourcePath;
         wasmtime_store_t* store = nullptr;
         wasmtime_module_t* module = nullptr;
         wasmtime_linker_t* linker = nullptr;
@@ -255,6 +259,7 @@ struct WasmModule : std::enable_shared_from_this<WasmModule>
         std::string stdioBuffer;
         uint32_t bookmarkSlot = 0;
         bool destroyPending = false;
+        bool faulted = false;
 
         uint8_t* wasmBase();
         size_t wasmMemSize();
