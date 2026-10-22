@@ -1,7 +1,7 @@
 {
         "CFX": {
-                "0x3BEE1B05": {
-                        "name": "SET_ENTITY_HIDDEN_FOR_PLAYER",
+                "0xAE6DCC1A": {
+                        "name": "SET_ENTITY_ROUTED_TO_PLAYER",
                         "params": [
                                 {
                                         "name": "entity",
@@ -12,18 +12,18 @@
                                         "type": "char*"
                                 },
                                 {
-                                        "name": "hidden",
+                                        "name": "routed",
                                         "type": "BOOL"
                                 }
                         ],
                         "results": "BOOL",
-                        "description": "Stops (or resumes) routing an entity to one client. Added by server_culling/engine/entity-hidden-for-player.patch; not in stock FXServer.",
-                        "hash": "0x3BEE1B05",
+                        "description": "nil",
+                        "hash": "0xAE6DCC1A",
                         "ns": "CFX",
                         "apiset": "server"
                 },
-                "0x52E8A746": {
-                        "name": "IS_ENTITY_HIDDEN_FOR_PLAYER",
+                "0x68361BA2": {
+                        "name": "IS_ENTITY_ROUTED_TO_PLAYER",
                         "params": [
                                 {
                                         "name": "entity",
@@ -35,17 +35,17 @@
                                 }
                         ],
                         "results": "BOOL",
-                        "description": "Whether SET_ENTITY_HIDDEN_FOR_PLAYER hid the entity from the client. Added by entity-hidden-for-player.patch.",
-                        "hash": "0x52E8A746",
+                        "description": "nil",
+                        "hash": "0x68361BA2",
                         "ns": "CFX",
                         "apiset": "server"
                 },
-                "0xC04AE691": {
-                        "name": "GET_ENTITY_HIDDEN_FOR_PLAYER_VERSION",
+                "0x4C72A90D": {
+                        "name": "GET_ENTITY_ROUTING_VERSION",
                         "params": [],
                         "results": "int",
-                        "description": "1 on a server built with server_culling/engine/entity-hidden-for-player.patch. Stock servers don't have the native, and calling it there returns 0.",
-                        "hash": "0xC04AE691",
+                        "description": "nil",
+                        "hash": "0x4C72A90D",
                         "ns": "CFX",
                         "apiset": "server"
                 }
