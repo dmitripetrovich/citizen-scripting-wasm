@@ -77,6 +77,8 @@ extern "C" {
         fn __cfx_copy_string_result(ctx_ptr: u32, result_idx: i32, buf: *mut u8, buf_max: i32) -> i32;
         #[link_name = "copy_binary_result"]
         fn __cfx_copy_binary_result(ctx_ptr: u32, ptr_idx: i32, size_idx: i32, buf: *mut u8, buf_max: i32) -> i32;
+        #[link_name = "read_resource_file"]
+        fn __cfx_read_resource_file(path: *const u8, path_len: u32, buf: *mut u8, buf_max: i32) -> i32;
         #[link_name = "emit_event"]
         fn __cfx_emit_event(name: *const u8, name_len: u32, args: *const u8, args_len: u32);
         #[link_name = "emit_net_event"]
@@ -1112,6 +1114,19 @@ pub fn get_binary_result(ctx: &NativeCtx, ptr_idx: i32, size_idx: i32) -> Vec<u8
                 buf
         }
 }
+
+pub fn read_resource_file(path: &str) -> Option<Vec<u8>> {
+        unsafe {
+                let len = __cfx_read_resource_file(path.as_ptr(), path.len() as u32, std::ptr::null_mut(), 0);
+                if len < 0 { return None; }
+                let mut buf = Vec::with_capacity(len as usize);
+                let read = __cfx_read_resource_file(path.as_ptr(), path.len() as u32, buf.as_mut_ptr(), len);
+                if read != len { return None; }
+                buf.set_len(len as usize);
+                Some(buf)
+        }
+}
+
 pub fn trace_str(msg: &str) {
         if !msg.is_empty() {
                 unsafe { __cfx_trace(msg.as_ptr(), msg.len() as u32); }

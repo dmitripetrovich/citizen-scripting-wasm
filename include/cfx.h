@@ -2098,6 +2098,7 @@ extern "C" {
         __attribute__((import_module("cfx"), import_name("get_last_native_error"))) int32_t __cfxGetLastNativeError(char* buf, int32_t buf_max);
         __attribute__((import_module("cfx"), import_name("copy_string_result"))) int32_t __cfxCopyStringResult(uint32_t ctx_ptr, int32_t result_idx, char* buf, int32_t buf_max);
         __attribute__((import_module("cfx"), import_name("copy_binary_result"))) int32_t __cfxCopyBinaryResult(uint32_t ctx_ptr, int32_t ptr_result_idx, int32_t size_result_idx, char* buf, int32_t buf_max);
+        __attribute__((import_module("cfx"), import_name("read_resource_file"))) int32_t __cfxReadResourceFile(const char* path, uint32_t path_len, char* buf, int32_t buf_max);
         __attribute__((import_module("cfx"), import_name("emit_event"))) void __cfxEmitEvent(const char* name, uint32_t name_len, const uint8_t* args, uint32_t args_len);
         __attribute__((import_module("cfx"), import_name("emit_net_event"))) void __cfxEmitNetEvent(const char* name, uint32_t name_len, int32_t target, const uint8_t* args, uint32_t args_len);
         __attribute__((import_module("cfx"), import_name("cancel_event"))) void __cfxCancelEvent();
@@ -2621,6 +2622,15 @@ inline std::vector<uint8_t> getBinaryResult(NativeCtx& ctx, int32_t ptrResultIdx
         std::vector<uint8_t> out(static_cast<size_t>(len));
         __cfxCopyBinaryResult(reinterpret_cast<uint32_t>(&ctx), ptrResultIdx, sizeResultIdx, reinterpret_cast<char*>(out.data()), len);
         return out;
+}
+
+inline bool readResourceFile(std::string_view path, std::vector<uint8_t>& out)
+{
+        int32_t len = __cfxReadResourceFile(path.data(), static_cast<uint32_t>(path.size()), nullptr, 0);
+        if (len < 0)
+                return false;
+        out.resize(static_cast<size_t>(len));
+        return __cfxReadResourceFile(path.data(), static_cast<uint32_t>(path.size()), reinterpret_cast<char*>(out.data()), len) == len;
 }
 
 }

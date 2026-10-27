@@ -635,6 +635,56 @@ static wasm_trap_t* CbCopyStringResult(void* env, wasmtime_caller_t* caller, con
         return nullptr;
 }
 
+static wasm_trap_t* CbReadResourceFile(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t* results, size_t)
+{
+        static constexpr int64_t READ_FILE_MAX = 64LL * 1024 * 1024;
+        auto* mod = static_cast<WasmModule*>(env);
+        WasmMem mem;
+        uint32_t pathPtr = ArgU32(args[0]), pathLen = ArgU32(args[1]), bufPtr = ArgU32(args[2]);
+        int32_t bufMax = args[3].of.i32;
+        if (!mem.init(caller) || !mem.check(pathPtr, pathLen) || (bufMax > 0 && !mem.check(bufPtr, static_cast<size_t>(bufMax))))
+        {
+                results[0] = I32Val(-1);
+                return nullptr;
+        }
+        std::string rel = mem.readStr(pathPtr, pathLen);
+        bool plain = !rel.empty() && rel[0] != '/' && rel.find('\0') == std::string::npos && rel.find('\\') == std::string::npos;
+        for (size_t at = 0; plain && at <= rel.size();)
+        {
+                size_t end = std::min(rel.find('/', at), rel.size());
+                plain = rel.compare(at, end - at, "..") != 0 && end > at;
+                at = end + 1;
+        }
+        std::string root = plain ? GetResourcePath(mod->rt->host(), mod->rt->resourceName()) : std::string{ };
+        int fd = root.empty() ? -1 : open((root + "/" + rel).c_str(), O_RDONLY | O_CLOEXEC);
+        struct stat st{ };
+        if (fd < 0 || fstat(fd, &st) != 0 || !S_ISREG(st.st_mode))
+        {
+                if (fd >= 0)
+                        close(fd);
+                results[0] = I32Val(-1);
+                return nullptr;
+        }
+        if (st.st_size > READ_FILE_MAX)
+        {
+                close(fd);
+                results[0] = I32Val(-2);
+                return nullptr;
+        }
+        size_t want = std::min<size_t>(static_cast<size_t>(st.st_size), bufMax > 0 ? static_cast<size_t>(bufMax) : 0);
+        size_t done = 0;
+        while (done < want)
+        {
+                ssize_t n = pread(fd, mem.base + bufPtr + done, want - done, static_cast<off_t>(done));
+                if (n <= 0)
+                        break;
+                done += static_cast<size_t>(n);
+        }
+        close(fd);
+        results[0] = I32Val(done == want ? static_cast<int32_t>(st.st_size) : -1);
+        return nullptr;
+}
+
 static wasm_trap_t* CbCopyBinaryResult(void* env, wasmtime_caller_t* caller, const wasmtime_val_t* args, size_t, wasmtime_val_t* results, size_t)
 {
         auto* mod = static_cast<WasmModule*>(env);
@@ -1157,6 +1207,7 @@ static const ImportDesc g_imports[] = {
         { "get_last_native_error", { WASM_I32, WASM_I32 }, { WASM_I32 }, CbGetLastNativeError, CbWorkerStub },
         { "copy_string_result", { WASM_I32, WASM_I32, WASM_I32, WASM_I32 }, { WASM_I32 }, CbCopyStringResult, CbWorkerStub },
         { "copy_binary_result", { WASM_I32, WASM_I32, WASM_I32, WASM_I32, WASM_I32 }, { WASM_I32 }, CbCopyBinaryResult, CbWorkerStub },
+        { "read_resource_file", { WASM_I32, WASM_I32, WASM_I32, WASM_I32 }, { WASM_I32 }, CbReadResourceFile, CbWorkerStub },
         { "emit_event", { WASM_I32, WASM_I32, WASM_I32, WASM_I32 }, { }, CbEmitEvent, CbWorkerStub },
         { "emit_net_event", { WASM_I32, WASM_I32, WASM_I32, WASM_I32, WASM_I32 }, { }, CbEmitNetEvent, CbWorkerStub },
         { "cancel_event", { }, { }, CbCancelEvent, CbWorkerStub },
