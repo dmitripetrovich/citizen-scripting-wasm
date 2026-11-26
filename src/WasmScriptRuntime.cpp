@@ -1302,7 +1302,8 @@ static void RunWorker(std::shared_ptr<WasmScriptRuntime::WorkerState> state, was
         if (auto* wasi_err = wasmtime_linker_define_wasi(linker))
                 wasmtime_error_delete(wasi_err);
         wasi_config_t* wasi = wasi_config_new();
-        wasmtime_context_set_wasi(wasmtime_store_context(store), wasi);
+        if (auto* wasiErr = wasmtime_context_set_wasi(wasmtime_store_context(store), wasi))
+                wasmtime_error_delete(wasiErr);
         auto** types = CachedImportFuncTypes();
         for (size_t i = 0; i < NUM_IMPORTS; ++i)
         {
